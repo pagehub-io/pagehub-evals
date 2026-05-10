@@ -36,4 +36,4 @@ Both tags fan out through `pagehub-infra/.github/workflows/deploy-app.yml@v1` (V
 
 ## Stack
 
-Standard pagehub-io fleet stack — see `~/github/pagehub-io/platform/STANDARD_STACK.md`. FastAPI + Pydantic, asyncpg, PostgreSQL via Supabase in prod/staging, Expo + TypeScript strict, Vercel + Cloudflare Pages, Modal for background jobs (none in v1).
+FastAPI + Pydantic, asyncpg, PostgreSQL via Supabase in prod/staging, Expo + TypeScript strict, Vercel + Cloudflare Pages, Modal for background jobs (none in v1).

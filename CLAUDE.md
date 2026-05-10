@@ -63,15 +63,14 @@ bearing **runs** are the product.
 
 ## Stack contract
 
-Inherits the fleet standard. See `~/github/pagehub-io/platform/STANDARD_STACK.md`.
-
 - Backend: FastAPI in `api/`. Every route declares `response_model`; every
   request body is a Pydantic model.
 - Frontend: Expo (React Native) with TypeScript strict mode.
 - Database: PostgreSQL via Supabase (staging/prod), Postgres via
   docker-compose (local). Schema applied idempotently from
   `api/shared/schema.sql` on boot.
-- Observability: `/metrics` Prometheus endpoint scraped by `eyes/`.
+- Observability: `/metrics` Prometheus endpoint scraped by the platform's
+  observability service.
 
 ## Scope guardrails for builds and reviews
 
