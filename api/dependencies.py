@@ -1,16 +1,23 @@
-"""Shared FastAPI dependencies for authentication.
+"""Authentication + authorization dependencies.
 
-Verifies the pagehub-auth-issued access token locally with the shared
-HS256 signing key. The `app_slug` claim is asserted against
-`pagehub_evals_app_slug` so a token minted for a different app cannot
-reach this app's data — mirrors the app-prayers pattern.
+Two auth paths land at the same ``AuthContext``:
+
+- **User JWT**: ``Authorization: Bearer <jwt>`` issued by pagehub-auth.
+  Verified locally with the shared HS256 signing keys. Slug must
+  match ``settings.app_slug``. Sets ``actor_kind="user"``.
+- **Harness key**: ``X-Harness-Key: <secret>``. Looked up against the
+  ``harness_keys`` table; revoked or unknown keys → 401. Sets
+  ``actor_kind="harness_key"``.
+
+Sending **both** headers on the same request → 422 (ambiguous
+attribution; per spec ``harness-key-auth``).
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 import asyncpg
 import jwt
@@ -18,19 +25,22 @@ from fastapi import Depends, Header, HTTPException
 
 from api.config import get_settings
 from api.shared.db import get_db
+from api.shared.secret_hash import hash_secret
 
 logger = logging.getLogger(__name__)
+
+ActorKind = Literal["user", "harness_key"]
 
 
 @dataclass
 class AuthContext:
-    user_id: str
-    pagehub_user_id: str
-    token: str
+    actor_kind: ActorKind
+    actor_id: str
     db: asyncpg.Connection
-    email: str
+    # User-only fields (empty when actor_kind == "harness_key").
+    email: str = ""
     is_admin: bool = False
-    raw_user_meta_data: dict = field(default_factory=dict)
+    raw_jwt_claims: dict = field(default_factory=dict)
 
 
 def _strip_bearer(authorization: str) -> str:
@@ -39,11 +49,8 @@ def _strip_bearer(authorization: str) -> str:
 
 def _verify_jwt(token: str) -> dict:
     settings = get_settings()
-    if not settings.jwt_signing_keys:
-        raise HTTPException(status_code=500, detail="JWT signing keys not configured")
-
     last_err: Optional[Exception] = None
-    for kid, secret in settings.jwt_signing_keys:
+    for _kid, secret in settings.jwt_signing_keys:
         try:
             return jwt.decode(
                 token,
@@ -58,40 +65,83 @@ def _verify_jwt(token: str) -> dict:
     raise HTTPException(status_code=401, detail="Invalid token")
 
 
-async def require_auth(
-    authorization: Optional[str] = Header(None),
-    db: asyncpg.Connection = Depends(get_db),
-) -> AuthContext:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
+async def _resolve_user(authorization: str, db: asyncpg.Connection) -> AuthContext:
     settings = get_settings()
     token = _strip_bearer(authorization)
     claims = _verify_jwt(token)
 
-    app_slug = claims.get("app_slug")
-    if app_slug != settings.app_slug:
+    if claims.get("app_slug") != settings.app_slug:
         raise HTTPException(status_code=403, detail="Token issued for a different app")
 
-    pagehub_user_id = str(claims.get("sub", ""))
-    if not pagehub_user_id:
+    user_id = str(claims.get("sub", ""))
+    if not user_id:
         raise HTTPException(status_code=401, detail="Token missing sub claim")
 
     email = (claims.get("email") or "").lower()
     is_admin = bool(email and email in settings.admin_emails)
 
     return AuthContext(
-        user_id=pagehub_user_id,
-        pagehub_user_id=pagehub_user_id,
-        token=token,
+        actor_kind="user",
+        actor_id=user_id,
         db=db,
         email=email,
         is_admin=is_admin,
-        raw_user_meta_data=claims,
+        raw_jwt_claims=claims,
     )
 
 
-async def require_admin(auth: AuthContext = Depends(require_auth)) -> AuthContext:
+async def _resolve_harness_key(secret: str, db: asyncpg.Connection) -> AuthContext:
+    if not secret.strip():
+        raise HTTPException(status_code=401, detail="Empty harness key")
+    hashed = hash_secret(secret.strip())
+    row = await db.fetchrow(
+        """
+        SELECT id::text AS id, revoked_at
+        FROM harness_keys
+        WHERE secret_hash = $1
+        """,
+        hashed,
+    )
+    if row is None:
+        raise HTTPException(status_code=401, detail="Unknown harness key")
+    if row["revoked_at"] is not None:
+        raise HTTPException(status_code=401, detail="Revoked harness key")
+    return AuthContext(actor_kind="harness_key", actor_id=row["id"], db=db)
+
+
+async def require_auth(
+    authorization: Optional[str] = Header(None),
+    x_harness_key: Optional[str] = Header(None),
+    db: asyncpg.Connection = Depends(get_db),
+) -> AuthContext:
+    if authorization and x_harness_key:
+        raise HTTPException(
+            status_code=422,
+            detail="Both Authorization and X-Harness-Key were sent — pick one",
+        )
+    if authorization:
+        return await _resolve_user(authorization, db)
+    if x_harness_key:
+        return await _resolve_harness_key(x_harness_key, db)
+    raise HTTPException(
+        status_code=401,
+        detail="Missing Authorization or X-Harness-Key header",
+    )
+
+
+async def require_user(auth: AuthContext = Depends(require_auth)) -> AuthContext:
+    """Endpoints that only operators (humans) can call — never harness keys.
+
+    Used for: minting/revoking harness keys, environment authoring,
+    request/collection authoring, secret reveal, run-listing through
+    the operator UX.
+    """
+    if auth.actor_kind != "user":
+        raise HTTPException(status_code=403, detail="Operator-only endpoint")
+    return auth
+
+
+async def require_admin(auth: AuthContext = Depends(require_user)) -> AuthContext:
     if not auth.is_admin:
         raise HTTPException(status_code=403, detail="Admin only")
     return auth

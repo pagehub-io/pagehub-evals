@@ -16,6 +16,7 @@ from api.collections.routes import router as collections_router
 from api.environments.routes import router as environments_router
 from api.evaluations.routes import router as evaluations_router
 from api.events.routes import router as events_router
+from api.harness_keys.routes import router as harness_keys_router
 from api.requests.routes import router as requests_router
 from api.runs.routes import router as runs_router
 
@@ -95,6 +96,7 @@ app.add_middleware(
 # Twin override (X-Twin-* dev-only).
 app.add_middleware(TwinMiddleware)
 
+app.include_router(harness_keys_router, tags=["Harness keys"])
 app.include_router(environments_router, tags=["Environments"])
 app.include_router(requests_router, tags=["Requests"])
 app.include_router(evaluations_router, tags=["Evaluations"])
