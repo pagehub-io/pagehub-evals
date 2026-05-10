@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint Python
+        run: ruff check api/
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install mobile dependencies
+        run: cd mobile && npm ci
+
+      - name: TypeScript type check
+        run: cd mobile && npx tsc --noEmit
+
+      - name: Audit npm dependencies
+        run: cd mobile && npm audit --audit-level=critical
+
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: pagehub_evals
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pagehub_evals
+        ports:
+          - 5533:5432
+        options: >-
+          --health-cmd "pg_isready -U pagehub_evals -d pagehub_evals"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        # Every env var below is required — config.py has no fallback
+        # defaults. If you add a new required var, set it here too.
+        env:
+          ENVIRONMENT: test
+          GIT_SHA: ci
+          APP_URL: http://localhost:8002
+          PAGEHUB_AUTH_BASE_URL: http://mock-pagehub-auth
+          PAGEHUB_AUTH_ISSUER: http://mock-pagehub-auth
+          SERVICE_API_KEY: ci-only-service-api-key-not-real
+          JWT_SIGNING_KEYS: ci-kid:ci-only-jwt-signing-key-not-real
+          APP_SLUG: pagehub-evals
+          RUNS_ENABLED: "true"
+          DATABASE_URL: postgresql://pagehub_evals:postgres@localhost:5533/pagehub_evals
+          ENCRYPTION_KEY: ZmVybmV0LXRlc3Qta2V5LTMyLWJ5dGVzLWJhc2U2NA==
+          ADMIN_EMAILS: ci-admin@example.com
+        run: pytest api/tests/ -v --tb=short

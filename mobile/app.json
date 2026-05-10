@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Pagehub Evals",
+    "slug": "pagehub-evals",
+    "version": "0.1.0",
+    "description": "Ground-truth gate for LLM coding harnesses.",
+    "orientation": "portrait",
+    "scheme": "pagehubevals",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0b1220"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "ios": {
+      "bundleIdentifier": "io.pagehub.evals",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "io.pagehub.evals"
+    }
+  }
+}

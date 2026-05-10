@@ -1,0 +1,46 @@
+name: Deploy (pagehub-evals)
+
+# Tag-triggered deploys via the pagehub-infra reusable-workflow pattern:
+#   git tag staging-2026-05-10 && git push --tags  → staging
+#   git tag v0.1.0              && git push --tags  → production
+#
+# Two reusable workflows do the work:
+#   * deploy-app.yml@v1          — Vercel API + per-env runtime config
+#                                  from deploy/<environment>.env
+#   * deploy-cloudflare.yml@v1   — Expo web build → Cloudflare Pages,
+#                                  branch `main` for v* tags / `staging`
+#                                  for staging-* tags.
+
+on:
+  push:
+    tags:
+      - 'staging-*'
+      - 'v*'
+
+jobs:
+  deploy-api:
+    uses: pagehub-io/pagehub-infra/.github/workflows/deploy-app.yml@v1
+    with:
+      app_name: pagehub-evals
+      environment: ${{ startsWith(github.ref_name, 'v') && 'production' || 'staging' }}
+    secrets: inherit
+
+  deploy-cloudflare:
+    needs: deploy-api
+    uses: pagehub-io/pagehub-infra/.github/workflows/deploy-cloudflare.yml@v1
+    with:
+      app_name: pagehub-evals
+      environment: ${{ startsWith(github.ref_name, 'v') && 'production' || 'staging' }}
+    secrets: inherit
+
+  health-check:
+    name: Health Check
+    needs: [deploy-api, deploy-cloudflare]
+    runs-on: ubuntu-latest
+    env:
+      API_URL: ${{ startsWith(github.ref_name, 'v') && 'https://pagehub-evals-production.vercel.app' || 'https://pagehub-evals-staging.vercel.app' }}
+    steps:
+      - name: Verify API health
+        run: |
+          set -euo pipefail
+          curl -fSL --max-time 30 "$API_URL/health" | jq .

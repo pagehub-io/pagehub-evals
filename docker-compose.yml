@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:16
+    container_name: pagehub-evals-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pagehub_evals
+    ports:
+      - "5533:5432"
+    volumes:
+      - pagehub-evals-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pagehub-evals-api
+    depends_on:
+      db:
+        condition: service_healthy
+    # Every var below is required by api/config.py — no fallbacks.
+    # For real local secrets, override via .env.local (gitignored) or
+    # `docker compose --env-file ...`.
+    environment:
+      - ENVIRONMENT=development
+      - GIT_SHA=dev
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/pagehub_evals
+      - APP_URL=http://localhost:8002
+      - JWT_SIGNING_KEYS=dev-kid:local-dev-jwt-signing-key-DO-NOT-USE-IN-PROD
+      - PAGEHUB_AUTH_BASE_URL=http://host.docker.internal:8080
+      - PAGEHUB_AUTH_ISSUER=http://localhost:8080
+      - SERVICE_API_KEY=local-dev-service-api-key
+      - ADMIN_EMAILS=support@pagehub.io
+      - APP_SLUG=pagehub-evals
+      - RUNS_ENABLED=true
+      # Fernet key for environment-secrets encryption. Dev-only; rotate
+      # via prod secrets manager. Generate:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - ENCRYPTION_KEY=ZmVybmV0LWRldi1rZXktMzItYnl0ZXMtbG9jYWwtb25seQ==
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./api:/app/api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pagehub-evals-db-data:
