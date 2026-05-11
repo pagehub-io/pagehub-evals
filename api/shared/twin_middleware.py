@@ -13,7 +13,7 @@ the service's outbound traffic (SSRF, exfil).
 from __future__ import annotations
 
 import contextvars
-from typing import Mapping
+from collections.abc import Mapping
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -21,18 +21,18 @@ from starlette.responses import Response
 
 from api.config import get_settings
 
-_twin_overrides_var: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
-    "pagehub_evals_twin_overrides", default={}
+_twin_overrides_var: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "pagehub_evals_twin_overrides", default=None
 )
 
 
 def get_twin_overrides() -> Mapping[str, str]:
-    return _twin_overrides_var.get()
+    return _twin_overrides_var.get() or {}
 
 
 def resolve_base_url(env_var_name: str, default: str) -> str:
     """Outbound HTTP helpers should call this instead of reading env vars directly."""
-    overrides = _twin_overrides_var.get()
+    overrides = _twin_overrides_var.get() or {}
     return overrides.get(env_var_name, default)
 
 

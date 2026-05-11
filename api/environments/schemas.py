@@ -11,7 +11,7 @@ class CreateEnvironmentRequest(BaseModel):
 
 
 class UpdateEnvironmentRequest(BaseModel):
-    name: str | None = Field(default=None, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     variables: dict[str, str] | None = None
     secrets: dict[str, str] | None = None
 
@@ -20,7 +20,8 @@ class EnvironmentResponse(BaseModel):
     id: UUID
     name: str
     variables: dict[str, str]
-    secrets: dict[str, str]  # masked unless reveal_secrets=true
+    # Either {"key": "********"} (default) or plaintext (?reveal_secrets=true).
+    secrets: dict[str, str]
     created_at: datetime
     updated_at: datetime
 

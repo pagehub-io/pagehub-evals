@@ -7,17 +7,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.config import get_settings
-from api.shared.db import close_pool, init_pool
-from api.shared.schema import apply_schema
-from api.shared.twin_middleware import TwinMiddleware
-
 from api.collections.routes import router as collections_router
+from api.config import get_settings
 from api.environments.routes import router as environments_router
 from api.evaluations.routes import router as evaluations_router
 from api.events.routes import router as events_router
+from api.harness_keys.routes import router as harness_keys_router
 from api.requests.routes import router as requests_router
 from api.runs.routes import router as runs_router
+from api.shared.db import close_pool, init_pool
+from api.shared.schema import apply_schema
+from api.shared.twin_middleware import TwinMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +95,7 @@ app.add_middleware(
 # Twin override (X-Twin-* dev-only).
 app.add_middleware(TwinMiddleware)
 
+app.include_router(harness_keys_router, tags=["Harness keys"])
 app.include_router(environments_router, tags=["Environments"])
 app.include_router(requests_router, tags=["Requests"])
 app.include_router(evaluations_router, tags=["Evaluations"])
@@ -122,7 +123,7 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint scraped by platform/eyes."""
-    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
     from fastapi import Response
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

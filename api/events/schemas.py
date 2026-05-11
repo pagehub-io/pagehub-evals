@@ -7,7 +7,8 @@ from pydantic import BaseModel
 
 class EventResponse(BaseModel):
     id: UUID
-    actor_user_id: str | None
+    actor_kind: str
+    actor_id: str | None
     kind: str
     target_kind: str
     target_id: UUID | None
