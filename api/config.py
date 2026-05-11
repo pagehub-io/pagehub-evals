@@ -15,7 +15,6 @@ default):
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -104,11 +103,11 @@ class Settings:
     database_url: str
     encryption_key: str
     admin_emails: frozenset[str]
-    sentry_dsn: Optional[str]
-    sentry_traces_sample_rate: Optional[float]
+    sentry_dsn: str | None
+    sentry_traces_sample_rate: float | None
 
 
-_settings_singleton: Optional[Settings] = None
+_settings_singleton: Settings | None = None
 
 
 def get_settings() -> Settings:
@@ -163,7 +162,7 @@ def get_settings() -> Settings:
 
     # Optional only — absence disables Sentry; presence enables it.
     sentry_dsn = os.getenv("SENTRY_DSN", "").strip() or None
-    sentry_traces_sample_rate: Optional[float] = None
+    sentry_traces_sample_rate: float | None = None
     if sentry_dsn:
         raw_rate = os.getenv("SENTRY_TRACES_SAMPLE_RATE", "").strip()
         if raw_rate:

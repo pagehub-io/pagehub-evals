@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 import asyncpg
 import jwt
@@ -49,7 +49,7 @@ def _strip_bearer(authorization: str) -> str:
 
 def _verify_jwt(token: str) -> dict:
     settings = get_settings()
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for _kid, secret in settings.jwt_signing_keys:
         try:
             return jwt.decode(
@@ -110,8 +110,8 @@ async def _resolve_harness_key(secret: str, db: asyncpg.Connection) -> AuthConte
 
 
 async def require_auth(
-    authorization: Optional[str] = Header(None),
-    x_harness_key: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
+    x_harness_key: str | None = Header(None),
     db: asyncpg.Connection = Depends(get_db),
 ) -> AuthContext:
     if authorization and x_harness_key:

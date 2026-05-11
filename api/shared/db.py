@@ -1,13 +1,13 @@
 """Asyncpg pool + per-request connection dependency."""
 
 import logging
-from typing import AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
 
 import asyncpg
 
 logger = logging.getLogger(__name__)
 
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 
 
 async def init_pool(database_url: str) -> asyncpg.Pool:
