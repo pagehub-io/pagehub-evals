@@ -37,3 +37,6 @@ web-build/
 # Local DB volumes
 *.db
 *.db-journal
+
+# Multi-agent build orchestration log
+.chief-build.log

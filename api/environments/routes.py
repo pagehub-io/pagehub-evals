@@ -183,20 +183,6 @@ async def delete_environment(
     )
 
 
-# Helper used elsewhere (run engine) — load decrypted variables + secrets
-# combined into a single substitution map.
-async def load_substitution_map(db, environment_id: UUID) -> dict[str, str]:
-    row = await db.fetchrow(
-        "SELECT variables, secrets FROM environments WHERE id = $1",
-        environment_id,
-    )
-    if row is None:
-        return {}
-    variables = row["variables"] or {}
-    if isinstance(variables, str):
-        variables = json.loads(variables)
-    secrets = row["secrets"] or {}
-    if isinstance(secrets, str):
-        secrets = json.loads(secrets)
-    revealed = _reveal_secret_map(secrets)
-    return {**variables, **revealed}
+# Helper used by the run engine lives in ``api.environments.substitution``
+# (kept FastAPI-free). The re-export above preserves any in-repo callers
+# that still import from this module.

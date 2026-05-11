@@ -1,6 +1,11 @@
 /**
  * ThemeContext stub. Mirrors app-prayers shape so AppHeader/DrawerContent
  * compile. Real theming + persistence lands later.
+ *
+ * Slice-2 added semantic verdict tokens (`success`/`danger`/`warning`)
+ * so the runs verdict surface can visually distinguish pass / fail /
+ * error. Values are GitHub Primer-ish and match the existing
+ * `primary: '#1f6feb'` accent.
  */
 
 import React, { createContext, useContext } from 'react';
@@ -13,6 +18,9 @@ export type Theme = {
     textMuted: string;
     primary: string;
     border: string;
+    success: string;
+    danger: string;
+    warning: string;
   };
 };
 
@@ -24,6 +32,9 @@ const lightTheme: Theme = {
     textMuted: '#5b6478',
     primary: '#1f6feb',
     border: '#e2e6ee',
+    success: '#1a7f37',
+    danger: '#cf222e',
+    warning: '#9a6700',
   },
 };
 
