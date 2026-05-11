@@ -1,0 +1,21 @@
+# Runtime dependencies for the Vercel @vercel/python function.
+#
+# @vercel/python resolves requirements.txt relative to the entrypoint
+# (api/index.py per vercel.json), so this file — not the repo-root
+# requirements.txt — is what actually ships. Keep it in sync with the
+# runtime portion of ../requirements.txt (the root file is the dev/test
+# superset: it adds pytest, pytest-asyncio, ruff, which must NOT be
+# bundled into the serverless function).
+fastapi==0.136.1
+starlette==0.52.1
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.2.2
+asyncpg==0.30.0
+httpx==0.28.1
+PyJWT==2.12.0
+cryptography==48.0.0
+prometheus-client==0.21.1
+slowapi==0.1.9
+sentry-sdk[fastapi]==2.19.2
