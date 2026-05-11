@@ -42,7 +42,7 @@ services:
       # Fernet key for environment-secrets encryption. Dev-only; rotate
       # via prod secrets manager. Generate:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      - ENCRYPTION_KEY=ZmVybmV0LWRldi1rZXktMzItYnl0ZXMtbG9jYWwtb25seQ==
+      - ENCRYPTION_KEY=6bzQXvxLe_oere1FNN-mWtRwyQXFUJBaOw_R7iYvcX8=
     ports:
       - "8002:8000"
     volumes:
