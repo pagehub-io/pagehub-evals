@@ -1,0 +1,324 @@
+{
+  "collections": [
+    {
+      "description": "Harness/oracle must return a legal move for each FEN. body_contains on a known-legal UCI move.",
+      "items": [
+        "chess-legal-from-startpos",
+        "chess-legal-from-midgame"
+      ],
+      "name": "chess-legality"
+    },
+    {
+      "description": "Server engine plays Black (seed 0); a scripted White line walks 4 plies; each step asserts the expected post-engine-reply FEN and status=in_progress.",
+      "items": [
+        "chess-game-open",
+        "chess-game-move-1-e2e4",
+        "chess-game-move-2-g1f3",
+        "chess-game-move-3-f1c4",
+        "chess-game-move-4-e1g1"
+      ],
+      "name": "chess-playable-game"
+    }
+  ],
+  "environments": [
+    {
+      "name": "chess-local",
+      "secrets": {},
+      "variables": {
+        "CHESS_BASE_URL": "http://localhost:8002"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "body": {
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+      },
+      "capture": {},
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "needle": "e2e4"
+          },
+          "kind": "body_contains",
+          "name": "e2e4-is-legal"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "echoes-fen"
+        },
+        {
+          "config": {
+            "expected": "white",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "white-to-move"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-legal-from-startpos",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves"
+    },
+    {
+      "body": {
+        "fen": "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+      },
+      "capture": {},
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "needle": "e4d5"
+          },
+          "kind": "body_contains",
+          "name": "exd5-is-legal"
+        },
+        {
+          "config": {
+            "needle": "g1f3"
+          },
+          "kind": "body_contains",
+          "name": "nf3-is-legal"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "echoes-fen"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-legal-from-midgame",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves"
+    },
+    {
+      "body": {
+        "engine_color": "black",
+        "seed": 0
+      },
+      "capture": {
+        "FEN": "$.fen",
+        "GAME_ID": "$.game_id",
+        "TURN": "$.turn"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "expected": "white",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "white-to-move"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "in-progress"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-game-open",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/games"
+    },
+    {
+      "body": {
+        "move": "e2e4"
+      },
+      "capture": {
+        "FEN": "$.fen",
+        "STATUS": "$.status"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "still-in-progress"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "expected-fen"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-game-move-1-e2e4",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/games/{{GAME_ID}}/moves"
+    },
+    {
+      "body": {
+        "move": "g1f3"
+      },
+      "capture": {
+        "FEN": "$.fen",
+        "STATUS": "$.status"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "still-in-progress"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/ppp1ppp1/8/3p3p/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "expected-fen"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-game-move-2-g1f3",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/games/{{GAME_ID}}/moves"
+    },
+    {
+      "body": {
+        "move": "f1c4"
+      },
+      "capture": {
+        "FEN": "$.fen",
+        "STATUS": "$.status"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "still-in-progress"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/p1p1ppp1/8/1p1p3p/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "expected-fen"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-game-move-3-f1c4",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/games/{{GAME_ID}}/moves"
+    },
+    {
+      "body": {
+        "move": "e1g1"
+      },
+      "capture": {
+        "FEN": "$.fen",
+        "STATUS": "$.status"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ok"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "still-in-progress"
+        },
+        {
+          "config": {
+            "expected": "rn1qkbnr/p1pbppp1/8/1p1p3p/2B1P3/5N2/PPPP1PPP/RNBQ1RK1 w kq - 2 5",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "expected-fen"
+        }
+      ],
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "method": "POST",
+      "name": "chess-game-move-4-e1g1",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/games/{{GAME_ID}}/moves"
+    }
+  ],
+  "version": 1
+}

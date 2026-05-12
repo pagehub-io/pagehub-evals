@@ -12,7 +12,10 @@ from api.config import get_settings
 from api.environments.routes import router as environments_router
 from api.evaluations.routes import router as evaluations_router
 from api.events.routes import router as events_router
+from api.fixtures._body_limit import FixtureBodyLimitMiddleware
+from api.fixtures.routes import router as fixtures_router
 from api.harness_keys.routes import router as harness_keys_router
+from api.modules.chess.routes import router as chess_router
 from api.requests.routes import router as requests_router
 from api.runs.routes import router as runs_router
 from api.shared.db import close_pool, init_pool
@@ -82,6 +85,18 @@ app = FastAPI(
 
 _settings = get_settings()
 
+# Starlette applies middleware in reverse registration order — the
+# LAST-registered middleware is the OUTERMOST. CORS must stay outermost
+# so error responses from inner middleware (e.g. a 413 from the body
+# limit) still carry CORS headers and a browser can read the body.
+# Final order, outermost → innermost: CORS → Twin → FixtureBodyLimit.
+
+# Bound the POST /v1/fixtures/import body before any JSON parsing.
+app.add_middleware(FixtureBodyLimitMiddleware)
+
+# Twin override (X-Twin-* dev-only).
+app.add_middleware(TwinMiddleware)
+
 # CORS — APP_URL is the canonical origin (Cloudflare Pages site).
 _allowed_origins = [_settings.app_url] if _settings.app_url else []
 app.add_middleware(
@@ -92,16 +107,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Twin override (X-Twin-* dev-only).
-app.add_middleware(TwinMiddleware)
-
 app.include_router(harness_keys_router, tags=["Harness keys"])
 app.include_router(environments_router, tags=["Environments"])
 app.include_router(requests_router, tags=["Requests"])
 app.include_router(evaluations_router, tags=["Evaluations"])
 app.include_router(collections_router, tags=["Collections"])
+app.include_router(fixtures_router, tags=["Fixtures"])
 app.include_router(runs_router, tags=["Runs"])
 app.include_router(events_router, tags=["Events"])
+app.include_router(chess_router, tags=["Modules: chess"])
 
 
 @app.get("/")

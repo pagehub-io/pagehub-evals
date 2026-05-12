@@ -1,534 +1,653 @@
 # SPEC
 
-> Build: pagehub-evals JTBD pivot — finish the `runs/` verdict-bearing engine.
+> Build: pagehub-evals — fixture import/export (declarative JSON bundles;
+> `POST /v1/fixtures/import` upsert-by-name + `GET /v1/collections/{id}/export`;
+> round-trip invariant; `fixtures/chess.json` as first consumer).
 
 ## Manager
 
-### Problem & users
+### Problem
+Populating a pagehub-evals instance with collections / requests / evaluations today means hand-POSTing many resources one at a time, or running imperative `platform/evals/seeds/` scripts that build them over HTTP. There is no named, declarative, version-controlled artifact that *is* an eval suite. So suites aren't diffable in code review, can't be re-applied idempotently to a fresh environment, and a hand-built collection can't be captured back into source. Cost of doing nothing: every new eval target (chess being the first) is bespoke setup work, environments drift, and "what evals does this instance actually have?" is unanswerable from git.
 
-**Who suffers without the verdict gate.** Operators of LLM coding harnesses
-(today: us; soon: anyone running long autonomous Claude/Cursor/etc loops).
-The agent runs, declares "fixed the bug, deploy is green," and the operator
-has no independent way to disprove it without re-running the work by hand.
+### Users
+- **Eval authors** (the people writing collections that grade harnesses) — want to write a suite as one JSON file, check it in, and import it anywhere.
+- **Operators** running pagehub-evals environments (staging/prod/local) — want `POST /v1/fixtures/import` to bring a fresh DB to a known state, idempotently, with a created/updated count they can trust.
+- **Harness owners** integrating an LLM coding harness — get a concrete, self-contained target (`chess.json`): a legality oracle plus the collections that score their harness against it.
+- **Reviewers** of this repo — get a diffable `fixtures/` directory instead of imperative seed scripts.
 
-**What they do today.** Either trust the agent's self-report (sometimes
-fiction) or manually `curl` the deployed system. Both cost humans-in-the-loop
-on every cycle — the thing the autonomous loop was supposed to remove.
+### Success criteria
+- `POST /v1/fixtures/import` of `fixtures/chess.json` into an empty DB creates the chess module's environments, requests (with inline evaluations), and the `chess-legality` + `chess-playable-game` collections; response reports accurate `created` / `updated` counts.
+- Re-importing the same fixture immediately after reports `created: 0` and only `updated` counts (or zero changes) — provably idempotent.
+- `GET /v1/collections/{id}/export` returns a fixture bundle that imports cleanly into a different environment and reproduces the same collection (items resolve by request name, not UUID).
+- Round-trip eval passes: `export → import → export` yields byte-identical bundles modulo timestamps and ids — and this is enforced by a checked-in eval, not a one-time manual check.
+- `fixtures/chess.json` round-trips through that eval like any other fixture.
+- A harness that returns a legal move for a given FEN passes `chess-legality`; a harness that plays a full game correctly against the server-side opponent passes `chess-playable-game`; wrong/illegal moves fail with evidence.
 
-**Cost of doing nothing.** The scaffolded `pagehub-evals` API has the
-resources (`environments`, `requests`, `evaluations`, `collections`,
-`harness_keys`) but `POST /v1/runs` returns 503 behind a feature flag. The
-schema (`api/shared/schema.sql:97`) already carries `harness_claim`,
-`verdict`, and `evidence` columns, but nothing populates them. Until the
-engine ships, the product's stated JTBD (`CLAUDE.md:3-9`) is unfulfilled
-and the harness operator's loop stays manually supervised.
+### In scope
+- Fixture file format: self-contained declarative JSON bundle — `environments[]`, `requests[]` (each with inline `evaluations[]`), `collections[]` whose items reference requests by **name**, not UUID.
+- `POST /v1/fixtures/import` — upsert-by-name, idempotent, returns created/updated counts. Auth via operator JWT.
+- `GET /v1/collections/{id}/export` — dumps the collection + its requests + their evaluations as a fixture bundle.
+- A checked-in eval asserting the `export → import → export` identity (modulo timestamps/ids).
+- `fixtures/` directory in the repo for checked-in fixture files.
+- `fixtures/chess.json`: the chess module (FEN → legal moves oracle + one-sided game opponent, backed by `python-chess` server-side), the `chess-legality` collection (harness returns a legal move for a FEN; eval checks the move is in `legal_moves`), and the `chess-playable-game` collection (server-side engine plays one side, validates the harness's side end-to-end).
+- Keeping eval *coverage* of all the above in `platform/evals/seeds/` as before — that layer keeps using seeds; this repo gets fixtures only.
 
-### Users (concrete)
+### Out of scope
+- Any UI — no fixtures-management screen, no chess board / game viewer. Triage UX for the resulting runs is the existing operator UI's job, untouched here.
+- Seed scripts inside pagehub-evals — fixtures are the only distribution unit here; no imperative population code lands in this repo.
+- Importing/exporting non-collection-scoped things or partial-bundle merge semantics beyond upsert-by-name (no rename detection, no deletes-on-import, no dependency-graph diffing).
+- Porting `platform/evals/` data into fixture format wholesale (chess is the only consumer this slice).
+- A general-purpose chess service — the module is a legality oracle and a one-sided opponent and nothing more (no openings, no clocks, no ratings, no PGN library surface).
+- Versioned/migratable fixture schema, signing, or a fixture registry — single declared shape, take it or leave it.
 
-- **LLM harness installations** (auth: harness key) — POST a run with
-  `harness_claim`, poll for verdict, hand it back to the agent so the loop
-  stops fabricating "done." A harness key sees ONLY its own runs
-  (`api/runs/routes.py:137-138`); never another harness's, never an
-  operator-created run. This is a security boundary, confirmed scope.
-- **Pagehub operators** (auth: pagehub-auth JWT, allowlisted) — read any
-  run, inspect evidence on failures, mint/revoke harness keys. List + detail
-  views in `mobile/app/(drawer)/runs.tsx` are sufficient this slice.
-
-### Success criteria (this slice)
-
-Measurable, all required:
-
-- `POST /v1/runs` is reachable without a feature flag for both auth kinds;
-  returns `202` with the persisted run id.
-- A run created against a seeded collection + environment transitions
-  `pending → running → {passed|failed|error}` and writes `started_at`,
-  `finished_at`, `verdict`, and `evidence` exactly once.
-- `harness_claim` is captured verbatim at creation and is byte-identical in
-  every subsequent `GET /v1/runs/{id}` response — no code path mutates it
-  after insert.
-- `PATCH /v1/runs/{id}` returns `403` for operator JWT AND for harness key,
-  for every field including `verdict`, `harness_claim`, `status`. The engine
-  is the only writer.
-- `evidence` JSONB contains, per request: substituted url, response status,
-  response headers, response body excerpt, latency_ms, per-eval pass/fail
-  with observed-vs-expected detail, and the captured-vars trail used to
-  substitute the next request.
-- Capture-and-substitute works: a request whose response feeds a JSONPath
-  capture (e.g., `$.id → REQ_ID`) makes that value available as `{{REQ_ID}}`
-  in any later request's url, headers, or body within the same run.
-- All four eval kinds (`status_eq`, `json_path_eq`, `header_present`,
-  `body_contains`) contribute pass/fail to the verdict.
-- `platform/evals/seeds/pagehub_evals_runs_*.py` exists and exercises:
-  create → poll-to-terminal, immutability of `harness_claim`, PATCH-403
-  from both auth kinds, capture/substitution across two requests, and one
-  failing-eval case that yields `verdict="failed"`. A feature without a
-  seed is invisible (`CLAUDE.md:platform/evals/`).
-
-### What "done" looks like vs. slice 3
-
-This slice ends when the four bullets above are green on staging. It does
-NOT end with twin-traffic accounting, operator triage charts, or filters
-in the mobile UI — those are slice 3.
-
-**Load-bearing edge case:** a `POST /v1/runs` with no `collection_id` (or
-a collection with zero items) MUST succeed at the API, run the engine, and
-yield `verdict='error'` with `evidence.requests=[]` — the `harness_claim`
-is preserved on the row. Rationale: rejecting the POST strands the agent's
-claim and invites the agent to rationalize a 4xx as "environment broken,
-not my fault." Recording the claim alongside the misconfiguration is the
-point of the gate.
-
-### Scope
-
-**In scope**
-- Harness-claim ingest (write-once at `POST /v1/runs`).
-- Run execution loop in `api/runs/engine.py`: ordered collection items,
-  `{{VAR}}` substitution into url/headers/body, JSONPath capture from
-  response into the substitution map for subsequent requests.
-- Per-request evaluation across the four existing kinds, with structured
-  observed-vs-expected detail in `evidence`.
-- Terminal verdict written exactly by the engine; PATCH blocked.
-- `evidence` JSONB shape: ordered per-request entries with request meta,
-  response meta, latency, per-eval outcome, captured-vars trail.
-- Mobile: `mobile/app/(drawer)/runs.tsx` shows a list (status + verdict
-  badge + harness_id + created_at) and a detail view (harness_claim,
-  verdict, per-request evidence).
-- Seeds at `platform/evals/seeds/pagehub_evals_runs_*.py` matching the
-  slice-1 sibling pattern (`pagehub_evals_evaluations.py`).
-- **Cross-repo dependency:** the seed files at
-  `~/github/pagehub-io/platform/evals/seeds/pagehub_evals_runs_*.py` are
-  AUTHORED in that repo as part of this slice; merging them is a parallel
-  PR (in `platform`) and gated by repo etiquette there. Slice is not "done"
-  until both PRs (here + platform) are green; the seed PR cannot land
-  before the API PR ships to staging.
-
-**Out of scope (this slice — slice 3 owns)**
-- Twin-zero-traffic evidence integration (no `twin_traffic_zero` eval kind
-  this slice; the schema comment in `api/shared/schema.sql:44` advertises
-  it but the engine ignores it).
-- Operator triage UX beyond list+detail — no filters, charts, drill-downs,
-  search, app/env/harness facets.
-- A stale-run reaper for in-process executions that die mid-flight
-  (engine docstring at `api/runs/engine.py:10-13` already concedes this).
-
-**Non-goals (we are explicitly not building this slice)**
-- Retry-on-failure semantics for failed requests in a run.
-- Harness-claim editing endpoints; the field is write-once by design.
-- **Raising the `harness_claim` 10 000-char cap** (`api/runs/schemas.py:33`).
-  Agents must summarize the claim, not paste a transcript. If a 10 000-char
-  cap is genuinely insufficient in practice, revisit in slice 3 with
-  evidence; the default position is "summarize."
-- Eval-bundle templates or reusable assertion packs.
-- Worker-based execution (slice 2 may move off `BackgroundTasks`; not now).
-- A second auth dimension (run-level ACLs beyond "harness sees own, operator
-  sees all" already implemented at `api/runs/routes.py:137-138`).
-
-### What of the WIP prototype we keep
-
-The uncommitted WIP (`api/runs/engine.py`, `api/runs/routes.py`,
-`api/runs/schemas.py`) already implements most of this slice cleanly:
-substitution walker, JSONPath-lite resolver, all four eval kinds, verdict
-aggregation, PATCH-403 guard, harness/operator read-scoping. The
-architect/builder has license to keep that surface and focus net-new
-effort on: removing the feature flag, adding **JSONPath capture from
-response → substitution map** (currently substitution is environment-only;
-the brief calls for per-response capture too), the seed file, and the
-mobile screens.
-
-### Risks & invalidation signals
-
-1. **Capture-rule schema location — MITIGATED.** Architect adopted
-   Option 1: add `requests.capture JSONB NOT NULL DEFAULT '{}'::jsonb`
-   (one-line idempotent `ADD COLUMN IF NOT EXISTS` in
-   `api/shared/schema.sql`). Captures hang off the request template, which
-   matches the seed pattern at
-   `~/github/pagehub-io/platform/evals/seeds/_shared.py:151`. Authoring UI
-   for `capture` is **slice 3**; slice 2 ships API-only access and the
-   seed file uses the API directly. No live risk on this point.
-
-2. **In-process `BackgroundTasks` execution makes runs untestable from
-   evals.** The seed loops would have to poll until `status` leaves
-   `pending|running`. If the staging worker recycles between request and
-   poll, the run is orphaned and the seed flakes.
-   *Invalidation signal:* >1% flake rate on the runs seed in staging CI.
-   That kicks slice 2 (worker-based runner) forward.
-
-3. **`verdict="error"` semantics are too broad.** Current aggregation
-   (`api/runs/engine.py:321-326`) returns `error` for *any* request-level
-   transport error AND for the no-evaluations case. Operators can't tell
-   "the system under test is down" from "I forgot to add evals." That
-   muddies the gate the JTBD relies on.
-   *Invalidation signal:* on the first 20 real runs, operators ask "why
-   did this error?" more than once. Tighten the distinction in slice 3.
-
-AGREE: yes
+### Open questions for the trio
+1. **Chess module placement (flag — Architect to settle).** "A chess module backed by `python-chess` server-side" reads two ways: (i) a new lightweight endpoint surface inside pagehub-evals (e.g. `/v1/modules/chess/legal-moves`, `/v1/modules/chess/play`) that the fixture's requests target via the instance's own base URL; or (ii) an external module the fixture's requests reach via a `{{BASE_URL}}`-style env var. **Recommended reading: (i)** — pagehub-evals already hosts the thing-under-test pattern, an in-repo module keeps `chess.json` truly self-contained (no external deploy to stand up before the fixture works), and it's the smaller moving-parts story. Either way the module stays tiny: FEN in → legal moves out, plus "engine plays one side" for the playable-game collection. (Review note for the Architect: the brief assumes this module exists; if it doesn't yet, that's a real prerequisite, not a detail.)
+2. Does `import` need an explicit "dry run" mode (report counts, change nothing) for operators validating a fixture before applying? Nice-to-have; defaulting to no unless cheap.
+3. On name collision across resource *types* sharing a namespace (e.g. a request and a collection both named `chess-legality`) — is name uniqueness per-type or global? Affects the upsert key. (Implementation detail flagged for the Architect.)
+4. Export auth: operator-only, or also harness-key-readable? Recommend operator-only (export is an authoring action), but worth a line in the spec.
 
 ## Designer
 
-Scope of this slice: **operator-facing read-only verdict surface**. The write
-surface is `POST /v1/runs` (harness-key actor) — no operator UI for that; the
-operator only observes. Two screens, one shape change to the existing
-`ThemeContext`.
+### Surfaces
 
-### Operator flows
+This slice is machine-facing. The "surfaces" are:
 
-#### 1. Run list — `mobile/app/(drawer)/runs.tsx` (replace stub)
+1. **The fixture file format** — a self-contained declarative JSON bundle, the
+   primary artifact operators hand-edit and `git diff`. Lives in `fixtures/*.json`.
+2. **`POST /v1/fixtures/import`** — body is a fixture bundle; upserts by name;
+   returns per-kind `{created, updated}` counts plus a top-level
+   `warnings: list[str]`. Idempotent (a re-import reports `created: 0`). Request
+   bodies over **1 MiB (1,048,576 bytes)** are rejected with `413` (self-describing
+   body) before any JSON parsing.
+3. **`GET /v1/collections/{id}/export`** — returns a fixture bundle (the
+   collection + its requests + their evaluations). `Content-Type:
+   application/json`, served inline (no `Content-Disposition`; callers redirect
+   to a file themselves — keeps it usable from Swagger "Try it out").
+4. **OpenAPI docs** at `/docs` and `/redoc` — `FixtureBundle`, `FixtureImportResponse`,
+   `FixtureImportError` schemas must be fully modeled (Pydantic `response_model`),
+   so the format is discoverable without reading source.
+5. **`fixtures/` directory** in the repo — checked-in fixture files; `fixtures/chess.json`
+   is the first consumer. No seed scripts — fixtures only.
 
-Reuse the existing list-screen idiom in `mobile/app/(drawer)/environments.tsx`
-and `requests.tsx` (ScrollView + theme tokens + `createStyles(theme)`). On
-mount, `GET /v1/runs` via `mobile/services/api.ts`, render newest-first.
+### The fixture bundle shape
 
-Row contents (one tappable card per run):
+Top-level keys, all optional except `version` (any key may be `[]`):
 
-- **Top row (left → right):** verdict pill (see below) · `harness_id` (or
-  `"—"` if null) · created_at as relative time (`"3m ago"`, `"yesterday"`).
-- **Middle:** `harness_claim` truncated to **2 lines, ellipsis** (the full
-  multi-paragraph blob lives on the detail screen). If null, render muted
-  `"(no claim recorded)"`.
-- **Bottom row (only when `status in {passed, failed, error}`):** request
-  count (`evidence.requests.length`) · total duration
-  (`finished_at − started_at`, rendered like `"1.2s"` / `"340ms"`). Hidden
-  for `pending` / `running` — those rows show a "running" pill instead and
-  no summary line.
+```jsonc
+{
+  "version": 1,                       // schema version; importer rejects unknown majors
+  "environments": [                   // OMITTED or [] in exports (see below)
+    {
+      "name": "chess-local",
+      "variables": { "CHESS_BASE_URL": "http://localhost:8002" },   // the instance's own origin
+      "secrets":   { }                       // KEYS ONLY, every value MUST be "" (non-empty → 422). chess.json needs none.
+    }
+  ],
+  "requests": [
+    {
+      "name": "legal-moves-from-startpos",
+      "method": "POST",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves",
+      "headers": { "Content-Type": "application/json" },
+      "body": { "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" },
+      "capture": {},                  // JSONPath-lite, value must start with "$"
+      "evaluations": [                // INLINE — not a separate top-level array
+        { "name": "ok",        "kind": "status_eq",     "config": { "expected": 200 } },
+        { "name": "e4-listed", "kind": "body_contains", "config": { "needle": "e2e4" } }
+      ]
+    }
+  ],
+  "collections": [
+    {
+      "name": "chess-legality",
+      "description": "Harness must return a legal move for each FEN.",
+      "items": [                      // ARRAY of request NAMES (strings). Array index == position (0,1,2,...). No explicit `position` field.
+        "legal-moves-from-startpos",
+        "legal-moves-from-midgame"
+      ]
+    }
+  ]
+}
+```
 
-Tap row → `router.push('/runs/' + id)`.
+> **Note on `items` shape (reconciled with Architect):** items are bare request
+> *name strings*, not `{ "request": "<name>" }` objects. The string-array form is
+> what the Architect's `FixtureCollection.items: list[str]` model declares; this
+> Designer section originally sketched the object form and has been brought into
+> line. Resolution semantics are unchanged: every name must resolve to a request
+> **in this same bundle** (bundle-only; see Error states).
 
-Refresh: pull-to-refresh on the list. No auto-poll on the list screen this
-slice (auto-poll is detail-only — see below).
+Field mapping onto stored shapes (`api/*/schemas.py`, `api/shared/schema.sql`):
 
-#### 2. Run detail — `mobile/app/(drawer)/runs/[id].tsx` (new file)
+- `environments[]` → `environments` table. `variables` = plaintext map (as today).
+  **`secrets` in a fixture carries KEYS ONLY with empty-string placeholder values.**
+  Rationale: secrets are Fernet ciphertext at rest; a fixture is a git-tracked
+  declarative file and must never carry decrypted secret material. On import: for
+  each secret key with an empty value, the importer **preserves the existing
+  ciphertext** if the environment already has that key, and creates the key with
+  an empty/unset marker if it's new (operator fills it in later via
+  `PATCH /v1/environments/{id}`, which already exists). A non-empty secret value
+  in a fixture is a **hard 422** ("fixtures must not contain secret values; use
+  empty placeholders") — fail loud, don't silently encrypt-and-store. On export:
+  `environments` is omitted entirely (see below), so this asymmetry only bites
+  hand-authored fixtures, and the 422 is the guardrail.
+  > **Resolved with the Architect** — the Architect's Contracts/Trade-offs
+  > sections now adopt this exact rule (`FixtureEnvironment.secrets: dict[str,
+  > str]`, every value MUST be `""`, non-empty → 422 at parse time; import
+  > preserves the target environment's existing ciphertext for a known key, and
+  > writes `encrypt("")` as an unset placeholder for a new key). An earlier
+  > Architect sketch said "plaintext, importer Fernet-encrypts" — that's been
+  > dropped (it could never round-trip: Fernet ciphertext is non-deterministic,
+  > and a git-tracked fixture must not carry decrypted secret material). No
+  > remaining conflict here.
+- `requests[]` → `requests` table. `body` is arbitrary JSON (`Any`, as today).
+  `capture` keeps its existing validation (`^[A-Za-z_]\w*$` keys, `$`-prefixed
+  JSONPath-lite values). `evaluations[]` nested under each request → `evaluations`
+  table rows with `request_id` resolved post-insert; `kind` validated against
+  `EvaluationKind` and `config` validated by the per-kind config model — an
+  unknown kind or bad config shape is a 422 referencing the offending request +
+  evaluation name (see Error states).
+- `collections[]` → `collections` + `collection_items`. `items[]` is a list of
+  request **names** (strings), each resolved to a UUID at import time. `position`
+  is the array index — there is no explicit `position` field, and any object-form
+  item (e.g. `{ "request": "...", "position": 3 }`) is rejected (`422`:
+  "collection items are request names, not objects") so two fixtures can't
+  disagree with themselves about ordering.
+- Volatile fields (`id`, `created_at`, `updated_at`, `owner_user_id`, and
+  `requests.id`/`evaluations.id`/`collections.id`/`collection_items.*`) **never
+  appear in a fixture** — not on import (ignored if present, with a warning in
+  the response) and not on export (stripped).
 
-Expo Router dynamic route. On mount, `GET /v1/runs/{id}`. Layout:
+### Primary flows
 
-- **Header block** (sticky at top of scroll):
-  - Verdict pill (large variant).
-  - `harness_id` as monospace caption.
-  - Timing: `started_at` (absolute) + total duration. If still running,
-    show elapsed since `started_at` and a subtle activity indicator next
-    to the pill — no full-screen spinner; the page already has data.
-- **Harness claim block:**
-  - Section header `"Harness claim"`.
-  - Full `harness_claim` text in a bordered surface card
-    (`theme.colors.surface` background, `theme.colors.border` 1px).
-    Preserve newlines (`<Text>` respects `\n` in React Native). No
-    truncation here.
-  - If null: muted `"(no claim recorded)"`.
-- **Request results list** (one card per entry in `evidence.requests`, in
-  execution order):
-  - **Row 1:** `request_name` (bold) · per-request status glyph derived
-    directly from server-computed `RunRequestResult.passed`:
-    - `✓` if `passed === true`.
-    - `✕` if `passed === false` AND `transport_error` is null.
-    - `⚠` if `transport_error` is set (distinct from eval failure).
-  - **Row 2 (monospace, muted):** `method` · `url` — the
-    **post-substitution** URL the engine actually fired. Per-row warning
-    indicator (small `⚠` after the URL, `colors.warning`) when this
-    request's `substitution_missed` is non-empty.
-  - **Row 3:** colored status-code chip (see semantics) · latency
-    (`"234ms"`). If `transport_error` is set, render the error string
-    here in place of the status+latency chip (e.g. `"ReadTimeout: …"`).
-  - **Captured caption (muted, only when `captured` is non-empty):** a
-    single line `"captured: CREATED_ID, AUTH_TOKEN"` — keys only, comma-
-    separated, in insertion order. Values-on-tap is deferred to slice-3.
-  - **Evaluations sub-list** (indented, one row per entry in
-    `result.evaluations`):
-    - ✓/✕ icon · `name` · `kind` as muted caption · short detail line
-      derived from the eval payload:
-      - `status_eq` → `"expected 200, got 404"`
-      - `json_path_eq` → `"$.user.id: expected 'abc', got 'xyz'"`, or
-        `"$.user.id: missing"` when `missing: true`.
-      - `header_present` → `"X-Request-Id: present"` / `"missing"`.
-      - `body_contains` → `"contains 'ok': true"` / `"false"`.
-      - Unknown kind / engine error on eval → red `error` string verbatim.
+1. **Author & import a fixture (operator):**
+   write/edit `fixtures/chess.json` → `POST /v1/fixtures/import` with the file as
+   the JSON body → 200 with `{created, updated}` per resource kind →
+   operator confirms counts match expectation → commits the file.
+2. **Re-import (idempotency check / CI):**
+   `POST /v1/fixtures/import` with the *same* file again → 200 with `created: 0`
+   for every kind (`updated` non-zero — rows were re-touched — but nothing new
+   was made) → re-import created nothing, so it's idempotent. (`created: 0` is
+   the idempotency signal — see the note in Import semantics on why there is no
+   `unchanged` bucket.)
+3. **Export a collection:**
+   `GET /v1/collections/{id}/export` → 200, body is a `FixtureBundle` with
+   `environments: []`, the collection, every request its items reference, every
+   evaluation on those requests → operator pipes to `fixtures/<name>.json`.
+4. **Round-trip (the invariant eval):**
+   pick a collection → `GET …/export` (call it A) → `POST …/import` of A →
+   `GET …/export` again (call it B) → assert
+   `normalize_for_roundtrip(A) == normalize_for_roundtrip(B)`, where
+   `normalize_for_roundtrip` is the single shared normalizer in
+   `api/fixtures/schemas.py` (Architect's Contracts section pins its exact
+   behavior: drop server-assigned fields wherever they appear, drop
+   `environments` from the comparison, sort `requests`/`collections`/per-request
+   `evaluations` by `name`, keep collection `items` in array order, carry
+   `version` through). Two consumers run it: a pure pytest in
+   `api/tests/test_fixtures_roundtrip.py` (drives `fixtures.engine` against a
+   test DB) and a `platform/evals/seeds/` seed in the *platform* repo (the
+   SPEC's "checked-in eval"). The assertion is exactly: **export → import →
+   export is identical modulo timestamps/ids — and in practice modulo nothing,
+   because export emits requests in first-referenced order and assigns positions
+   densely from array index, so the normalizer's sort steps are no-ops on
+   export-produced bundles.**
+5. **Harness runs `chess-legality` (downstream of this slice):**
+   harness authenticates → `POST /v1/runs` against the imported `chess-legality`
+   collection → engine executes each request (harness's move responses are the
+   fixture's `requests[]`) → evaluations assert legality → verdict.
 
-Auto-refresh: when `status in {pending, running}`, poll `GET /v1/runs/{id}`
-every **2s**. Stop polling on first terminal status. Stop polling after
-**5 minutes of continuous `running` status** (matches the future stale-run
-reaper window); at that point show a muted caption `"still running…"` and a
-manual **Retry** button — pressing Retry resumes 2s polling for another 5
-minutes. Keep pull-to-refresh enabled at all times — operators expect to
-force a refresh themselves.
+### Import semantics & response shape
 
-Read-only: no buttons, no destructive actions. PATCH is server-rejected
-anyway; the UI just doesn't offer it.
+`POST /v1/fixtures/import` request body = a `FixtureBundle`. Response
+(`FixtureImportResponse`, 200):
 
-### Empty / loading / error states
+```jsonc
+{
+  "environments": { "created": 1, "updated": 0 },
+  "requests":     { "created": 2, "updated": 0 },
+  "evaluations":  { "created": 4, "updated": 0 },
+  "collections":  { "created": 2, "updated": 0 },
+  "warnings": [
+    "environments[0]: ignored unexpected key 'id'",
+    "requests[1].evaluations[0]: existing evaluation reused (matched by name)"
+  ]
+}
+```
 
-| Condition | UI |
-|---|---|
-| Run list, initial fetch in flight | Single centered `ActivityIndicator`, no skeleton rows. Match the bare style of the existing stub screens. |
-| Run list, fetch succeeds with `items: []` | Centered block: title `"No runs yet"`, body `"Runs appear here when a harness POSTs to /v1/runs with its claim."` — mirrors the copy density of the current stubs. |
-| Run list, fetch errors (network / 5xx) | Centered block: `"Couldn't load runs"` · the error message in muted text · a `"Retry"` text button (TouchableOpacity, primary color). No silent retry. |
-| Run list, 401/403 | Same shape, copy `"Not authorized to view runs"`. No retry button. |
-| Run detail, initial fetch in flight | Centered `ActivityIndicator`. |
-| Run detail, 404 | Centered block: `"Run not found"`, body `"This run id doesn't exist or you don't have access."`, "Back to runs" link → `/runs`. |
-| Run detail, run is `pending` | Header pill = "pending" (muted). Body: muted line `"Waiting for engine to pick up this run."` No request list (evidence is empty). |
-| Run detail, run is `running` | Header pill = "running" (primary). Body: muted line `"Engine is executing requests. This page refreshes every 2 seconds."` Request list renders whatever requests are already in evidence (engine writes terminal-only today; UI tolerates either). |
-| Run detail, terminal `error` (engine itself failed, not just a per-request error) | Verdict pill = "error" (warning color). Below header, a warning-bordered surface card titled `"Engine error"` showing `evidence.engine_error` if present, else `"Engine terminated with status=error but did not record details."` Request list still renders if `evidence.requests` is non-empty (partial progress). |
-| Detail polling fetch fails mid-run | Keep last good state on screen; show small muted footer `"Refresh failed, retrying…"`. Don't blank the page. After 3 consecutive failures, stop polling and surface a `"Retry"` button. |
+- **`{created, updated}` only — no `unchanged`, no `deleted` bucket** (reconciled
+  with the Architect, who owns the importer). `created` = rows that did not exist
+  by their unique key before this import; `updated` = rows that existed and were
+  re-touched (whether or not the values actually changed). `created: 0` on a
+  re-import is the idempotency signal flow #2 keys on. Distinguishing "touched but
+  unchanged" needs a per-row before/after diff that operators don't act on; and
+  for children that are delete-all-then-reinsert (evaluations, collection items)
+  there's no stable per-row identity to count `deleted` against — so the eval
+  set / item list count rolls up to its **parent** (an evaluation set is
+  "created" if its request was created, "updated" if the request already existed).
+  Trade-off noted: an operator can't see from the response that the import *also
+  silently dropped* three stale evaluations or two stale collection items — the
+  declarative-replace behavior below is the only documentation of that, so it has
+  to be loud in the OpenAPI description. (Designer's earlier draft listed
+  `unchanged`/`deleted`; brought into line.)
+- **Upsert key is `name`** scoped to the importing operator (`owner_user_id`),
+  which matches the existing `UNIQUE (owner_user_id, name)` on environments and
+  collections. Requests have no unique constraint today — Architect adds
+  `UNIQUE (owner_user_id, name)` on `requests`; this also means `POST`/`PATCH
+  /v1/requests` can now 409 (mirroring collections/environments).
+- **Evaluations** are children of a request; the importer **replaces** a
+  request's evaluation set with the fixture's list (declarative desired-state) —
+  delete-all-then-reinsert per request. An evaluation present in the DB but
+  absent from the fixture is **dropped** (silently, modulo the loud OpenAPI doc).
+  The whole eval set counts under its parent request's bucket (see above).
+- **Collection items: import REPLACES the item list.** A fixture is
+  declarative/desired-state. If a collection's stored items have diverged from
+  the fixture (rows added via `POST /v1/collections/{id}/items` since the last
+  import), import **discards the divergence and rewrites items to exactly the
+  fixture's order**. This is the highest-stakes semantic decision in the slice —
+  it must be documented at the top of the OpenAPI description for the endpoint
+  and in `fixtures/README.md`. (Flagged below — Architect/Manager sign-off
+  wanted.)
+- **All-or-nothing.** The whole import runs in one transaction. One bad
+  evaluation `kind` in a 50-request fixture rolls back *everything* — no partial
+  state. Best-effort import would leave operators guessing what landed; reject it.
 
-### Verdict pill semantics
+### Export shape
 
-Pills are small rounded rects with text. Five states; the current theme
-exposes no semantic color tokens, so this slice **adds three** to
-`mobile/contexts/ThemeContext.tsx`. Flagging explicitly per the prompt:
+`GET /v1/collections/{id}/export` → 200, `Content-Type: application/json`,
+body is a `FixtureBundle` with:
 
-> **Theme token change required.** Existing `Theme.colors` is
-> `background, surface, text, textMuted, primary, border` only
-> (`mobile/contexts/ThemeContext.tsx:9-17`). Add `success`, `danger`,
-> `warning`. Suggested light-theme values: `success: '#1a7f37'`,
-> `danger: '#cf222e'`, `warning: '#9a6700'` (GitHub Primer palette,
-> matches `primary: '#1f6feb'` already in the file).
-> If the architect wants tokens frozen this slice, the fallback is:
-> passed → `primary`, failed/error → `text` with the glyph carrying
-> meaning. Strongly prefer adding the tokens — a verdict surface that
-> doesn't visually distinguish pass from fail defeats the JTBD.
+- `version`: current.
+- `environments`: **`[]` always.** Export cannot know which environment a
+  collection "belongs to" — collections reference `{{VAR}}`s, not env ids; the
+  binding only exists per-run. Emitting a guessed env would be wrong; emitting
+  all envs would leak unrelated secrets' key names. So: empty list. A
+  hand-authored fixture may include `environments`; an export never does. **Flag
+  for Architect:** confirm `[]` (not key-omitted) so the round-trip eval's
+  canonical form is stable.
+- `requests`: every request referenced by the collection's items, **in item
+  order**, deduplicated (a request used twice appears once in `requests[]`,
+  twice in `items[]`), each with its `evaluations[]` inline (in `created_at`
+  then `name` order — deterministic).
+- `collections`: exactly the one collection, `items[]` as a list of request
+  **name strings** in position order.
+- No `id`, `created_at`, `updated_at`, `owner_user_id` anywhere.
+- 404 if the collection id doesn't exist or isn't visible to the caller.
 
-| State | Pill background | Pill text | Glyph |
-|---|---|---|---|
-| `passed` | `colors.success` (fallback: `primary`) | white | `✓` |
-| `failed` | `colors.danger` | white | `✕` |
-| `error` | `colors.warning` | white | `!` |
-| `running` | `colors.primary` | white | small spinner inline |
-| `pending` | `colors.surface` + 1px `colors.border` | `colors.textMuted` | `·` |
+### `chess.json` worked example
 
-Status-code chips on request rows use the same palette: `2xx → success`,
-`3xx → primary`, `4xx → warning`, `5xx → danger`. `response_status=0` is
-the engine's sentinel for "request errored before a response" — render
-it as the literal string `"ERR"` (not `"0"`), `danger` colored, with the
-`transport_error` field shown next to it.
+`fixtures/chess.json` ships two collections. The chess module is an **in-repo**
+endpoint surface at `/v1/modules/chess/...` (Architect resolved Manager
+open-question #1 this way: `api/modules/chess/`, `python-chess`-backed,
+**unauthenticated** — it's the eval *target*, not a protected resource, and
+keeping it in-repo makes `chess.json` truly self-contained). The fixture pins
+the host with one bundled env var, `CHESS_BASE_URL`, set to the instance's own
+origin (`http://localhost:8002` local; the public Vercel URL on staging/prod),
+so request `url`s read `{{CHESS_BASE_URL}}/v1/modules/chess/...`.
 
-### Out of scope this slice (deferred to slice-3 — do NOT build)
+**Module endpoints the fixture pins (matching the Architect's Chess module HTTP
+contract):**
 
-- Filters (by app / environment / harness / status / verdict).
-- Search box over `harness_claim`.
-- Harness drill-in (`/harnesses/[id]` aggregate view).
-- Re-run / retry button on the detail screen.
-- Evidence raw-JSON download / copy-evidence-as-JSON action.
-- Twin-zero-traffic evidence panel (the "did service A leak a call to
-  service B" assertion). Schema may carry it later; UI ignores it this
-  slice.
-- Run-to-run diffing.
-- Pagination — `GET /v1/runs` already caps at 500; pagination ships with
-  filters in slice 3.
-- Long-press / clipboard helpers on `harness_id` and other ids.
-- Capture-rule editor UI (authoring `requests.capture`) — slice-2 ships
-  only API access; mirrors the architect's deferred list.
-- Values-on-tap for the per-request `captured` keys (only keys render this
-  slice).
+- `POST {{CHESS_BASE_URL}}/v1/modules/chess/legal-moves` — body
+  `{ "fen": "<FEN>" }`, `fen` required → `200 { "fen": "<echoed normalized
+  FEN>", "legal_moves": ["e2e4","g1f3", …], "turn": "white"|"black",
+  "is_game_over": bool }` (UCI long algebraic, sorted). Invalid FEN → `422`.
+  Used by `chess-legality`.
+- `POST {{CHESS_BASE_URL}}/v1/modules/chess/games` — body `{ "engine_color":
+  "white"|"black", "seed"?: <int>, "starting_fen"?: "<FEN>" }` (`seed`
+  defaults to `0`, `starting_fen` defaults to startpos) → `200 { "game_id":
+  "<uuid>", "fen": "<current FEN>", "turn": "white"|"black", "status":
+  "in_progress", "engine_color": "white"|"black", "engine_move": "<uci>"|null,
+  "move_history": ["<uci>", …] }` (`engine_move` non-null iff the engine just
+  moved, i.e. `engine_color == "white"`). Used by `chess-playable-game` to open
+  with `engine_color == "black"`.
+- `POST {{CHESS_BASE_URL}}/v1/modules/chess/games/{{GAME_ID}}/moves` — body
+  `{ "move": "<uci>" }` → `200` for any *parseable* UCI string: `{ "game_id":
+  "<uuid>", "fen": "<current FEN>", "turn": "white"|"black", "status":
+  "in_progress"|"illegal_move"|"harness_won"|"harness_lost"|"draw",
+  "engine_move": "<uci>"|null, "move_history": ["<uci>", …], "legal_moves":
+  ["..."] }`. An illegal-given-the-position move → board unchanged,
+  `status: "illegal_move"`, `engine_move: null`, `legal_moves` lists what would
+  have been accepted (evidence) — **not a 4xx**. `404` if `game_id` unknown;
+  `422` only if `move` is un-parseable as UCI notation. Routing "illegal given
+  position" to a body `status` (not a transport error) is deliberate — every
+  step's eval is then a uniform `json_path_eq $.status`, never a transport-error
+  special case.
 
-### Edge cases the design must handle
+**`chess-legality` collection** — N independent requests (no `capture` threading,
+order doesn't matter), each posting a known FEN:
 
-- **Long `harness_claim` (multi-paragraph, code blocks, up to 10 000
-  chars per `api/runs/schemas.py:33`):** detail screen renders the full
-  string with `\n` preserved. No markdown rendering this slice — raw
-  text in a surface card. List screen always truncates to 2 lines
-  regardless of content.
-- **Null `harness_claim` / null `harness_id`:** list shows muted
-  placeholder text (`"(no claim recorded)"` / `"—"`). Detail shows the
-  same placeholder in the claim block; the page still renders.
-- **Non-JSON or odd response body (`response_body_excerpt` is a string,
-  possibly HTML/text):** render as monospace text, truncated to the
-  engine's already-applied 1000-char excerpt; no pretty-print attempt.
-  If `response_body_excerpt` is a dict/list, render the first 200 chars
-  of `JSON.stringify(body)` inline followed by `…`. No expander control
-  this slice — operators can re-fire the request from a real tool if
-  they need the full body.
-- **Substitution miss — `{{VAR}}` left literal in url/headers/body:**
-  consume `RunRequestResult.substitution_missed` directly from the
-  server — list the missed keys (e.g. `"unresolved: CREATED_ID,
-  AUTH_TOKEN"`) in the inline warning above the request list whenever
-  any request has non-empty `substitution_missed`; per-row warning
-  indicator on Row 2 (spec'd above) when that request's
-  `substitution_missed` is non-empty. No client-side regex — the engine
-  is authoritative and covers headers/body that a URL-only regex would
-  miss.
-- **Per-request transport error (network/timeout — engine writes
-  `transport_error` string, `response_status=0`, no evaluations run):**
-  render the row with `⚠`, show `transport_error` verbatim where
-  status+latency would go, omit the evaluations sub-list (it's empty
-  anyway). Run-level verdict is `error` per engine aggregation.
-- **`evidence.requests` is `[]`** (collection had no items, or
-  `collection_id` was null): detail screen shows the header block
-  normally, then a muted `"No requests executed."` line where the list
-  would be. Verdict will be `error` (engine sets verdict=error when
-  `not any_evaluations`); the header pill already conveys that.
-- **Concurrent runs of the same collection:** each gets its own row; no
-  merging. List is strictly `created_at DESC`.
-- **Clock skew on `started_at` / `finished_at` (Postgres `now()` across
-  conns):** if `finished_at < started_at`, render duration as `"<1ms"`
-  rather than a negative number.
-- **Very fast run (sub-ms):** render `"<1ms"`, not `"0ms"`, so the
-  operator doesn't think the run didn't actually fire.
-- **Operator viewing a harness-created run, harness viewing operator-
-  created run:** auth already enforced server-side (`routes.py:137-138`
-  — harness keys 403 on other-actor runs). UI treats 403 the same as
-  404 on the detail screen (`"Run not found"`) — don't leak existence.
+```jsonc
+{
+  "name": "legal-from-startpos",
+  "method": "POST",
+  "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves",
+  "headers": { "Content-Type": "application/json" },
+  "body": { "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" },
+  "evaluations": [
+    { "name": "ok",            "kind": "status_eq",     "config": { "expected": 200 } },
+    { "name": "e4-is-legal",   "kind": "body_contains", "config": { "needle": "e2e4" } },
+    { "name": "echoes-fen",    "kind": "json_path_eq",  "config": { "path": "$.fen", "expected": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" } }
+  ]
+}
+```
+
+Note: with the current `EvaluationKind` set (`status_eq`, `json_path_eq`,
+`header_present`, `body_contains`) we can't do "asserted move ∈ returned
+`legal_moves` array" generically — `body_contains` on the UCI string is the
+pragmatic stand-in (the shipped fixture hard-codes a FEN and a known-legal move
+and asserts `body_contains` on that move). **Flag:** if the Architect wants a
+real `move_in_legal_moves` kind, that's a small new `EvaluationKind` + config
+model; otherwise `body_contains` is acceptable for the scaffold.
+
+**`chess-playable-game` collection** — an *ordered* sequence; the module holds
+game state in `chess_games`, the engine plays Black (picking a **uniformly
+random legal move**, RNG seeded by the request-body `seed`), the harness (whose
+move-bodies *are* the fixture's `requests[]`) plays White. The fixture pins a
+known `seed` so the engine's replies are deterministic and the author can script
+a full legal White line; `capture` threads `game_id` forward. (**Inherited flag
+from the Architect:** the engine seed comes from the `/games` request *body*, not
+from `game_id` — `game_id` is server-assigned, unknowable at authoring time — and
+`api/modules/chess/README.md` must document the canonical `seed` + scripted line
+`chess.json` relies on, or the per-step `$.fen` evals are meaningless.)
+
+1. **open-game** — `POST …/v1/modules/chess/games` body
+   `{ "engine_color": "black", "seed": <documented constant> }`.
+   `capture`: `{ "GAME_ID": "$.game_id", "FEN": "$.fen", "TURN": "$.turn" }`.
+   evals: `status_eq 200`; `json_path_eq $.turn == "white"` (engine plays
+   Black, so after the opening it is White's — the harness's — turn).
+2. **white-move-1** — `POST …/v1/modules/chess/games/{{GAME_ID}}/moves` body
+   `{ "move": "e2e4" }` (a hardcoded sound move from the scripted line; the
+   *point* is the harness under test produces these, but as a fixture they're
+   literal). `capture`: `{ "FEN": "$.fen", "STATUS": "$.status" }`. evals:
+   `status_eq 200`; `json_path_eq $.status == "in_progress"` (the harness's move
+   was legal — it'd be `"illegal_move"` otherwise — and didn't end the game);
+   `json_path_eq $.fen == "<expected post-engine-reply FEN from the documented line>"`.
+3. **white-move-2 … white-move-K** — same shape, walking the short scripted line.
+4. **final** — last request's evals assert `$.status` is `in_progress` or `draw`
+   — **never `harness_lost`** (and never `illegal_move`). ("A+C playable": the
+   harness end-to-end plays a side without an illegal move and without getting
+   mated in the scripted window.)
+
+The turn loop, as request+eval pairs: `open → (move, assert-status-and-fen)* →
+assert-final-status`. `capture` carries `GAME_ID` forward (with `FEN`/`STATUS`
+along for evidence); the module is the source of truth for the board.
+
+### Error states
+
+- **Unknown evaluation `kind` in a fixture** → `422`, body
+  `{ "error": "invalid_evaluation_kind", "request": "<name>", "evaluation":
+  "<name>", "kind": "<bad value>", "allowed": ["status_eq","json_path_eq",
+  "header_present","body_contains"] }`. Nothing imported (transaction rolled
+  back). Operator fixes the kind and re-imports.
+- **Bad evaluation `config` shape** (e.g. `status_eq` without `expected`) →
+  `422`, `{ "error": "invalid_evaluation_config", "request": "<name>",
+  "evaluation": "<name>", "detail": "<pydantic message>" }`. Rolled back.
+- **Collection item names a request not in the bundle** → **bundle-only
+  resolution** (the Architect adopted this — Designer's lean): every name in
+  `items` MUST appear in *this* bundle's `requests[]`. No fall-back to whatever
+  request happens to be stored under that name (that would make import
+  non-deterministic across instances — the drift this feature exists to kill).
+  Unresolved → `422`, `{ "error": "unresolved_request_ref", "collection":
+  "<name>", "item_index": N, "request": "<name>" }`. Consequence: a
+  "collections-only" fixture (items referencing requests it doesn't declare) is
+  illegal — by design. A future opt-in `allow_external_refs` flag could relax
+  this if a real need shows up; YAGNI now.
+- **Duplicate `name` within one fixture** (two `requests[]` with the same name,
+  two `environments[]`, etc.) → `422`,
+  `{ "error": "duplicate_name", "kind": "request", "name": "<name>" }`. Reject
+  before touching the DB — the bundle is internally inconsistent.
+- **Duplicate request name within one collection's `items[]`** is *allowed*
+  (a request can appear at multiple positions).
+- **Empty fixture** (`{ "version": 1 }` or all arrays empty) → `200` with all
+  counts zero, `warnings: ["fixture contained no resources"]`. Not an error —
+  makes `import` safe to call defensively.
+- **Secret value present in a fixture** (`secrets: { "K": "actual-value" }`) →
+  `422`, `{ "error": "secret_value_in_fixture", "environment": "<name>",
+  "key": "K" }`. (See bundle-shape note above.)
+- **Unknown top-level key / unknown `version` major** → `422`,
+  `{ "error": "unsupported_fixture_version", "got": N, "supported": [1] }` or
+  `{ "error": "unexpected_top_level_key", "key": "<k>" }`. (Unexpected keys
+  *inside* a resource are warnings, not errors — forward-compat for additive
+  fields.)
+- **Malformed JSON body** → FastAPI's default `422` for a bad request body;
+  acceptable.
+- **`GET …/export` on a nonexistent/invisible collection id** → `404`
+  `{ "error": "collection_not_found" }`.
+
+### Edge cases
+
+- **Round-trip of an empty collection** (no items): export emits
+  `requests: []`, `collections: [{name, description, items: []}]`,
+  `environments: []`; import accepts it; re-export is identical. ✔
+- **A request shared by two collections, both exported separately:** each export
+  bundle independently includes that request; importing both is idempotent on
+  the second (the shared request reports `updated`, never a duplicate `created`).
+- **Concurrent imports of the same fixture** (CI + operator): the per-row upsert
+  is `INSERT ... ON CONFLICT (owner_user_id, name) DO UPDATE`; last writer wins;
+  both calls return consistent counts (one may see `created`, the other
+  `updated`). The collection-items REPLACE happens inside the transaction so
+  it's atomic per collection.
+- **Very large fixture** (hundreds of requests): single transaction, single
+  response with aggregate counts — no streaming, no pagination. If this becomes
+  a problem it's a follow-up; flag if the Architect foresees timeout risk on
+  Vercel's function limit.
+- **Long `name`s / `url`s:** validated by the existing `max_length` constraints
+  on the create schemas (`name` 200, `url` 2000); a fixture exceeding them gets
+  the same `422` with `request: <name>` context.
+- **`body` containing `{{VAR}}` placeholders that no bundled environment
+  defines:** not validated at import time (consistent with how requests are
+  created today — substitution failures surface at run time, not author time).
+  No error.
+- **Re-import after manually deleting a collection item via the API:** import
+  rewrites the item list from the fixture, so the deletion is undone — this is
+  the declarative-desired-state contract, and the OpenAPI doc says so.
+- **Stripping volatile fields the operator left in by accident** (e.g. copied an
+  API response into a fixture): `id`/`created_at`/`updated_at`/`owner_user_id`
+  are silently ignored with a `warnings[]` entry — don't 422 on them, that'd
+  punish the obvious "export, tweak, re-import" loop.
+
+---
+
+**Flags for Architect / Manager (status as of reconciliation):**
+
+- *(highest stakes — RESOLVED)* Import **replaces** a collection's `items[]` and
+  a request's `evaluations[]` — declarative desired-state, divergence is
+  discarded. Architect confirms; **must be documented loudly** at the top of the
+  `POST /v1/fixtures/import` OpenAPI description and in `fixtures/README.md` —
+  this is the one behavior that surprises operators (a re-import undoes any item
+  or eval they added via the resource APIs since the last import).
+- *(RESOLVED)* Export emits `environments: []` (never bundles an env, never
+  key-omits it). Architect confirms — keeps the round-trip normal form stable.
+- *(RESOLVED)* `requests` gains `UNIQUE (owner_user_id, name)` (Architect, in
+  Integrations); side effect: `POST`/`PATCH /v1/requests` can now 409 — mirrored
+  on those routes.
+- *(RESOLVED — `unchanged`/`deleted` dropped)* `FixtureImportResponse` is
+  `{created, updated}` per kind + a top-level `warnings: list[str]`. Designer's
+  earlier draft had `unchanged` + `deleted`; Architect's simpler shape wins
+  (`created: 0` is the idempotency signal). **Residual UX cost, accepted:** the
+  response gives operators no number for "this import silently dropped N stale
+  evaluations / items" — the loud OpenAPI doc on declarative-replace is the only
+  surfacing of that. Designer flags it but does not block.
+- *(RESOLVED)* Secrets in a fixture = keys-only with `""` values; non-empty value
+  → hard `422` at parse time; import preserves the target env's existing
+  ciphertext for a known key, writes `encrypt("")` as an unset placeholder for a
+  new key. Architect adopted this; the earlier "plaintext, importer encrypts"
+  sketch is gone.
+- *(RESOLVED)* Request-ref resolution: **bundle-only** (Architect adopted
+  Designer's lean). A collections-only fixture is illegal, by design.
+- *(OPEN — optional)* A `move_in_legal_moves` `EvaluationKind` for the chess
+  fixture instead of `body_contains` against a UCI string — small new
+  `EvaluationKind` + config model; not blocking, `body_contains` is acceptable.
+- *(OPEN — Designer ask)* The error bodies in **Error states** above all use a
+  rich `{ "error": "<code>", ...context }` shape; the Architect's Contracts
+  section doesn't declare a `FixtureImportError` Pydantic model for them. Either
+  model it (so `/docs` shows the 422 shapes) or explicitly say errors ride
+  FastAPI's default `HTTPException` `{"detail": ...}` envelope with the code
+  string in `detail`. Designer's preference: model it.
 
 AGREE: yes
 
 ## Architect
 
-### WIP triage verdict
-
-- `api/runs/routes.py` — **REFACTOR (keep ~90%).** Auth split, 503 gate, 202 + background dispatch, harness-key self-read clamp, and blanket PATCH 403 are correct. Slice-2 ships with `RUNS_ENABLED=true` everywhere so leaving `_gate()` on all five handlers is fine. One small edit: `_row_to_response` (routes.py:36-54) currently constructs `RunResponse` from a raw asyncpg row; **`RunResponse.evidence` type swaps from `dict[str, Any]` to `RunEvidence`** (see Contracts), so this needs to round-trip through `RunEvidence.model_validate(row["evidence"])` before constructing `RunResponse`. PLAN's data section will line-item this validation flow.
-- `api/runs/schemas.py` — **KEEP, EXTEND.** `RunStatus` and `RunVerdict` enums are correct. `CreateRunRequest` correctly omits `verdict`/`status`/`evidence` (write-once at engine), `RunResponse` shape matches the row. Add `model_config = ConfigDict(extra="forbid")` on `CreateRunRequest` so a client attempting to send `verdict` at POST time gets 422 rather than silent drop — this is the HTTP-layer enforcement of write-once. Add `RunRequestResult`, `RunEvaluationResult`, `RunEvidence` (see Contracts).
-- `api/requests/schemas.py` + `api/requests/routes.py` — **EXTEND.** Add `capture: dict[str, str] = {}` to `CreateRequestRequest`, `UpdateRequestRequest`, and `RequestResponse`. Routes' INSERT/UPDATE/SELECT statements must read/write the new `requests.capture` JSONB column. Required by the capture-and-substitute success criterion; the slice-1 seed at `pagehub_evals_evaluations.py:63` already POSTs `capture={"PARENT_REQ_ID": "$.id"}` and the schema must accept it.
-- `api/runs/engine.py` — **REFACTOR.** The bones are right, the joints leak. Per concern:
-  - **Substitution walker** (`_substitute`, engine.py:35-49): **KEEP.** Pure recursion over str/dict/list, leave-on-miss matches policy. NIT: O(N*K) string scans; fine for slice-2 sizes (<50 vars, <50 requests).
-  - **`_resolve_path`** (engine.py:60-98): **KEEP.** JSONPath-lite handles `$.a.b[0]` and chained `$.a[0].b` correctly via the `_MISSING` sentinel. Bracket-quoted keys (`$['a.b']`) are unsupported — document inline, punt to slice-3 if anyone needs it.
-  - **Eval-kind dispatch** (engine.py:129-134, `_KINDS`): **KEEP.** Table-driven, clean to extend. Slice-3 adds `twin_traffic_zero` here.
-  - **Verdict aggregation** (engine.py:316-331): **REFACTOR.** Current `all_eval_passed` is computed across ALL per-request evals globally — fine, but a per-request `transport_error` does NOT short-circuit that request's evals. Restate so each request has a clean `passed` boolean and the run-level rule reads off those. See Verdict Aggregation below.
-  - **Evidence shape** (engine.py:222-244, 333): **REFACTOR.** Wraps as `{"requests": [...]}` which is right; per-request entry is missing `substitution_missed: list[str]` (required by miss-policy). Add it. `body_excerpt` deep-copy via `json.loads(json.dumps(...))` (engine.py:227) is wasteful — drop the deep-copy and trust `r.json()` returned fresh objects.
-  - **Transaction boundaries** (engine.py:250-353): **REFACTOR.** Currently holds a single `pool.acquire()` connection across the whole run including N HTTP fires. With a 10-conn pool (`api/shared/db.py:18`) and `command_timeout=30` that's pool-starvation risk for any run >30s. Reshape: acquire conn #1 to write `started_at`/`status='running'`, RELEASE before HTTP fires, acquire conn #2 for the terminal UPDATE + final events. Engine should call `get_pool()` and manage its own short-lived acquires, not hold one connection for the run lifetime.
-  - **In-process `BackgroundTasks`** (routes.py:96): **ACCEPTABLE FOR SLICE-2 with one guardrail.** It's per-uvicorn-worker, non-durable, dies on deploy/crash. Slice-2 caveat: every terminal UPDATE must be guarded `WHERE status='running'` so a re-fire on the same `run_id` can't clobber an already-written verdict (the engine writes terminal state only after the `pending → running` transition succeeded, never directly from `pending`). The stale-run reaper is slice-3 — name it in PLAN so reliability flags the gap rather than rebuilding it now.
-
 ### Components
 
-- **`api/runs/routes.py`** — HTTP only. Auth resolution, body validation, row serialization, dispatch into `BackgroundTasks`. No HTTP-client logic, no substitution, no evaluation. Imports from `api.runs.engine` are limited to the `execute_run` entry point.
-- **`api/runs/engine.py`** — Pure execution. **MUST NOT** import `fastapi.*` (no `Request`, `BackgroundTasks`, `HTTPException`, `Depends`, no Pydantic request/response models — engine returns dicts that the route serializes). Talks to Postgres via `asyncpg` through `api.shared.db.get_pool()`, fires outbound HTTP via `httpx.AsyncClient`. Public surface is exactly one coroutine: `async def execute_run(run_id: UUID) -> None`. Everything else (`_substitute`, `_resolve_path`, `_KINDS`, `_execute_request`, `_apply_captures`) stays module-private.
-- **`api/environments/substitution.py`** — **NEW (slice-2 prerequisite).** Extract `load_substitution_map(db, environment_id) -> dict[str, str]` out of `api/environments/routes.py:188-202` into this non-FastAPI module so the engine can import it without dragging FastAPI symbols transitively. `environments/routes.py` updates its single in-file caller to import from the new module. No back-compat shim — internal helper, single-repo refactor. The current engine import (`api/runs/engine.py:25` → `api.environments.routes`) is what makes the "engine MUST NOT import fastapi" rule false today; this is the fix.
-- **`api/runs/schemas.py`** — Pydantic only. Existing enums + `CreateRunRequest`/`RunResponse`/`RunListResponse`, plus new `RunRequestResult`, `RunEvaluationResult`, `RunEvidence` for typed evidence. No DB, no FastAPI types.
+**`api/fixtures/` — new resource module (routes + schemas + engine).**
+- `api/fixtures/schemas.py` — the authoritative Pydantic models for the fixture bundle (`FixtureBundle`, `FixtureEnvironment`, `FixtureRequest`, `FixtureEvaluation`, `FixtureCollection`) plus the import-response model (`FixtureImportResponse`) and the canonical-form normalizer. Boundary: pure data shapes + validation; no DB, no FastAPI.
+- `api/fixtures/engine.py` — the import/export logic. Same convention as `api/runs/engine.py`: **MUST NOT import any `fastapi.*` symbol.** Takes an `asyncpg.Connection` (already inside a transaction, opened by the route), an owner id, and a `FixtureBundle`; returns a `FixtureImportResponse`-shaped result. Also the inverse: `build_export(conn, collection_id) -> FixtureBundle`. The route layer owns the transaction, HTTP status mapping, and `record_event`. Keeping the engine FastAPI-free is worth it here — the import path is non-trivial (3 resource types, name resolution, child-replace) and is exercised directly by the pytest round-trip test without spinning up the app.
+- `api/fixtures/routes.py` — `APIRouter(prefix="/v1/fixtures")`, mounted in `api/main.py` alongside the others. Exactly one route: `POST /v1/fixtures/import`. Auth: `require_user` (operator-only authoring, mirrors collections/requests/environments). Wraps `engine.import_bundle` in a single `async with auth.db.transaction():`, then `record_event(... kind="fixtures.imported" ...)` on success.
 
-### Integrations
+**Export route placement — sub-route on collections, NOT on fixtures.** `GET /v1/collections/{collection_id}/export` lives in `api/collections/routes.py`. Rationale: it's a *projection of a collection* (the resource is `/v1/collections/{id}`), it needs the same 404-on-missing-collection behavior already implemented there, and the existing pattern is "operations on a collection hang off `/v1/collections/{id}/...`" (cf. `/items`). Putting it under `/v1/fixtures/...` would force the id into a query param or a second path segment with no resource of its own. The handler is thin: `require_user`, 404 if collection missing, then `return await fixtures.engine.build_export(auth.db, collection_id)` with `response_model=FixtureBundle`. (It imports the fixtures engine — a leaf dependency, no cycle: `collections.routes -> fixtures.engine`, and `fixtures.engine` imports nothing from `collections`.)
 
-Internal helpers the engine consumes (all in-repo, all non-FastAPI):
+**`api/modules/chess/` — new "module" namespace (the eval *target*, not an eval primitive).**
+- `api/modules/__init__.py`, `api/modules/chess/routes.py` (`APIRouter(prefix="/v1/modules/chess")`), `api/modules/chess/schemas.py`, `api/modules/chess/engine.py` (the `python-chess` wrapper: legal-move enumeration + the trivial "engine plays one side" mover; FastAPI-free). New top-level `api/modules/` package signals "things-under-test hosted in-repo" and leaves room for future eval modules without polluting the resource namespace. Mounted in `api/main.py` with `tags=["Modules: chess"]`.
+- New table `chess_games` in `api/shared/schema.sql` (see Integrations) — game state must survive a serverless cold start / uvicorn restart mid-run, so it is NOT in-memory.
 
-- **`api.environments.substitution.load_substitution_map(db, environment_id) -> dict[str, str]`** — new module (see Components). Returns `{**variables, **decrypted_secrets}` for the run's environment. Engine seeds the run-local substitution map from this single call at run start.
-- **`api.shared.db.get_pool()` / `get_db()`** — asyncpg connection pool. Engine acquires short-lived connections per the Concurrency rules; never holds across HTTP fires.
-- **`api.shared.events.record_event(...)`** — emits `run.created` / `run.started` / `run.completed` rows into the shared `events` table. The audit timeline is addressable via the existing `GET /v1/events?target_kind=run&target_id={id}` endpoint; no nested `/runs/{id}/events` route is added.
-- **`api.dependencies.{require_auth, require_user}`** — auth resolution. Routes use these; engine does not (engine runs without an auth context, dispatched via `BackgroundTasks`).
-
-Cross-repo dependency (parallel PR, gated by the same slice):
-
-- **`~/github/pagehub-io/platform/evals/seeds/pagehub_evals_runs_*.py`** — authored as part of this slice but lands as a PR in the `platform` repo. Slice is not "done" until both PRs (this repo + `platform`) are green; the seed PR cannot land before the API PR ships to staging. The seed exercises create → poll-to-terminal, PATCH-403 from both auth kinds, capture/substitution across two requests, and one failing-eval case. The pre-existing slice-1 seed at `platform/evals/seeds/pagehub_evals_evaluations.py:63` already POSTs `capture={"PARENT_REQ_ID": "$.id"}` against `POST /v1/requests`; the `capture` field added to `api/requests/{schemas,routes}.py` MUST accept this shape unchanged or the slice-1 seed regresses.
+**`fixtures/` — checked-in fixture files (repo root, not under `api/`).** Plain data, sibling to `api/` and `mobile/`. First and only file this slice: `fixtures/chess.json`.
 
 ### Contracts
 
-#### HTTP
+#### Fixture bundle JSON (the file format = `FixtureBundle` Pydantic model)
 
-- `POST /v1/runs` — `require_auth` (user JWT OR `X-Harness-Key`; both → 422 via the existing dep at `api/dependencies.py:117-121`). Body `CreateRunRequest` (`extra="forbid"`). Returns **202** + `RunResponse` with `status="pending"`, `verdict=null`, `evidence={"requests": []}`. Dispatches `execute_run(row.id)` via `BackgroundTasks`. A client attempting to send `verdict` or `status` in the body → 422 (extra fields forbidden).
-- `GET /v1/runs` — `require_user` (operator-only; harness keys 403). Newest first, `LIMIT 500`. Pagination deferred to slice-3.
-- `GET /v1/runs/{id}` — `require_auth`. Operator sees any run; harness key sees only rows where `created_by_kind='harness_key' AND created_by_id = auth.actor_id` (matches existing routes.py:137-138). Mismatched harness key → **403** (designer treats 403 same as 404 in UI to avoid leaking existence; backend remains 403 so eval seeds can distinguish "not yours" from "doesn't exist").
-- `PATCH /v1/runs/{id}` — `require_auth`, always **403**. No body parsing; route exists solely to make the contract explicit and testable from both auth kinds.
-- **No `GET /v1/runs/{id}/events`.** Recommendation: the `evidence` JSON is sufficient for run-detail. The `events` table is shared infra (already queryable via `GET /v1/events?target_kind=run&target_id={id}`) and emits `run.created` / `run.started` / `run.completed` records — the audit timeline is already addressable. Mobile run-detail reads `evidence.requests[]` for per-request rows and (optionally, slice-3) reuses the existing events endpoint for the timeline. Adding a nested route duplicates that surface.
-
-#### Pydantic shapes (additions to `schemas.py`)
-
-```python
-class RunEvaluationResult(BaseModel):
-    id: UUID
-    name: str
-    kind: str
-    passed: bool
-    detail: dict[str, Any] = {}          # observed/expected/path/etc
-    error: str | None = None             # python exception during eval
-
-class RunRequestResult(BaseModel):
-    request_id: UUID
-    request_name: str
-    method: str
-    url: str                              # post-substitution
-    response_status: int                  # 0 if transport-errored
-    response_headers: dict[str, str]
-    response_body_excerpt: Any            # str|dict|list, truncated server-side
-    latency_ms: int
-    transport_error: str | None           # None if HTTP completed
-    substitution_missed: list[str]        # keys present as {{X}} that subs lacked
-    captured: list[str]                   # keys only — vars this request added to the run's sub map; values live in the in-process subs dict, never persisted
-    evaluations: list[RunEvaluationResult]
-    passed: bool                          # transport_error is None AND every eval passed
-
-class RunEvidence(BaseModel):
-    requests: list[RunRequestResult]
-    # engine_error reserved for slice-3 (broader error taxonomy)
-
-# RunResponse.evidence: RunEvidence   (was dict[str, Any])
+```jsonc
+{
+  "version": 1,                      // int, required, == 1; importer rejects anything else (422)
+  "environments": [                  // optional, default []
+    {
+      "name": "chess-local",
+      "variables": { "CHESS_BASE_URL": "http://localhost:8002" },   // the instance's own origin
+      "secrets": { }                 // KEYS ONLY; every value MUST be "" — non-empty → 422 (see secrets rule). chess.json needs none.
+    }
+  ],
+  "requests": [                      // optional, default []; names unique within the bundle
+    {
+      "name": "chess-legality-probe",
+      "method": "POST",
+      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves",
+      "headers": { "Content-Type": "application/json" },
+      "body": { "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" },  // any JSON, or null
+      "capture": { },                // var_name -> JSONPath-lite ($-prefixed), same rules as requests.capture
+      "evaluations": [
+        { "name": "move-is-legal", "kind": "body_contains", "config": { "needle": "e2e4" } }
+      ]
+    }
+  ],
+  "collections": [                   // optional, default []; names unique within the bundle
+    {
+      "name": "chess-legality",
+      "description": "Harness returns a legal move for a FEN.",
+      "items": [ "chess-legality-probe" ]   // ARRAY of request *names*; array index == position (0..n-1)
+    }
+  ]
+}
 ```
 
-This makes `/docs` accurate and gives the mobile client a typed shape matching the designer's per-request row contract.
+Model rules (enforced at parse time → 422 before any DB write):
+- `version: int` — required, must equal `1`. Forward-compat hook; a future shape bumps it and the importer dispatches. (Recommend yes — costs one field, buys a clean migration story; SPEC's "out of scope: versioned/migratable schema" is about *migration tooling*, not about reserving the field.)
+- `FixtureEvaluation { name: str(1..200), kind: EvaluationKind, config: dict }` — `config` validated through the **existing** `api/evaluations/schemas.py` `_CONFIG_VALIDATORS[kind]` via a `model_validator(mode="after")`, identical to `CreateEvaluationRequest`. A bad `kind` or malformed `config` is a 422 at import, never a stored no-op row. (Reuse, do not re-declare, the per-kind config models.)
+- `FixtureRequest` reuses the `requests/schemas.py` constraints: `method` regex `^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$`, `url` 1..2000, `capture` validated by `_validate_capture_dict` (import it). `body: Any = None`.
+- `FixtureEnvironment.secrets: dict[str, str]` — **keys only, every value MUST be the empty string `""`.** A non-empty value anywhere → **422 at parse time** (`{"error": "secret_value_in_fixture", "environment": "<name>", "key": "<k>"}`), before any DB write. Resolves the Designer's keys-only annotation vs. the earlier "plaintext, importer encrypts" sketch: **keys-only-with-blank-values wins** — a fixture is a git-tracked artifact and must never carry decrypted secret material, and Fernet ciphertext is non-deterministic so it could never round-trip anyway. On import, per key with an empty value: if the target environment already has that key, **preserve its existing ciphertext untouched**; if the key is new, store it with an empty-string ciphertext placeholder (`encrypt("")`) for the operator to fill in later via the existing `PATCH /v1/environments/{id}`. `environments` is always `[]` on export, so this asymmetry only affects hand-authored fixtures and the 422 is the guardrail. (`api/environments/schemas.py` `CreateEnvironmentRequest.secrets` keeps accepting plaintext for the *direct* `POST /v1/environments` path — unchanged; the keys-only rule is a property of the *fixture* model, not of environments.)
+- `FixtureCollection.items: list[str]` — request names. **Bundle-only resolution: every name in `items` MUST appear in this bundle's `requests[]`, else 422.** Rationale: a fixture is a *self-contained declarative artifact* (SPEC: "self-contained", "no external deploy to stand up before the fixture works"). Falling back to "whatever request with that name happens to already be in the DB owned by this operator" makes import non-deterministic across instances — exactly the drift the feature exists to kill. Consequence: a "collections-only" fixture is illegal; that's the right call. (A future slice can add an opt-in `allow_external_refs` flag if a real need shows up; YAGNI now.)
+- Name uniqueness is **per resource type** within the bundle (a request and a collection may both be named `chess-legality`). Cross-type collisions are harmless because they upsert into different tables on different unique keys; SPEC open question #3 resolved: per-type.
+- Empty bundle (`{"version":1}`) is valid and a no-op (all counts zero).
 
-### {{VAR}} substitution + capture contract
+#### `POST /v1/fixtures/import`
+- Auth: `require_user` → 403 for harness keys / anonymous.
+- Body: `FixtureBundle` (the JSON above). Malformed → 422 with field path.
+- Success → `200` with `FixtureImportResponse`:
+  ```json
+  {
+    "environments": { "created": 1, "updated": 0 },
+    "requests":     { "created": 3, "updated": 0 },
+    "evaluations":  { "created": 4, "updated": 0 },
+    "collections":  { "created": 2, "updated": 0 },
+    "warnings": [
+      "environments[0]: ignored unexpected field 'id'",
+      "fixture contained no resources"
+    ]
+  }
+  ```
+  - `warnings: list[str]` — present always (empty list when nothing to say). Carries non-fatal observations: a volatile/server-assigned field left on a resource object by an export-tweak-reimport loop (`id`, `created_at`, `updated_at`, `owner_user_id`, `request_id`, `collection_id`) is **silently dropped with a warning, never a 422** (don't punish the obvious loop); an empty bundle emits `["fixture contained no resources"]`. Unknown fields *inside* a resource → warning (forward-compat for additive fields); an unknown *top-level* key or unknown `version` major → 422 (those are structural). (Note: there is no `position` field anywhere in the format — collection `items` is a `list[str]` of request names; an item given as an object is a plain type error → 422, not a warning.) This matches the Designer's `warnings[]` annotation — adopting it into the contract.
+  - `created` = rows that did not exist (by unique key) before this import; `updated` = rows that existed and were touched (whether or not values actually changed). **No `unchanged` bucket and no `deleted` bucket this slice.** `unchanged` needs a per-row before/after value diff for a number operators don't act on; "re-import reports `created: 0`" is the idempotency signal SPEC's success criteria ask for and `created`/`updated` already give it. `deleted` would be actively misleading: evaluations and collection items use **delete-all-children-then-reinsert**, so a "deleted" count would equal the entire child population of every touched parent on every re-import — noise, not signal. For `evaluations` and `collection_items`, the count is reported **against the parent**: an evaluation set is `created` if its request was created, `updated` if its request already existed (same for items vs. their collection). (Document this so the count is reproducible.) The locked response shape is `{created, updated}` per resource type + a top-level `warnings: list[str]`; a re-import shows `created: 0` (and `updated` ≥ 0) — that's the idempotency signal. (The Designer's prose is consistent with this.)
+- Errors: 422 (bad bundle, unresolved item name, bad eval config, secret value present in a fixture, unknown top-level key, unknown `version` major), 403 (not operator), 500 (unexpected) — and the transaction rolls back, so a 422/500 leaves the DB exactly as before.
+- **Error envelope: FastAPI's default `HTTPException` `{"detail": ...}` shape — NO dedicated `FixtureImportError` Pydantic model.** Every 422 case carries enough context inside `detail` (a plain string or a small dict, e.g. `{"error": "secret_value_in_fixture", "environment": "<name>", "key": "<k>"}` or `"collection 'chess-legality' item 'chess-legality-probe' not found in bundle requests[]"`); Pydantic body-validation 422s already emit the standard `{"detail": [{"loc": ..., "msg": ...}]}` list and we don't override that. There is **no** `FixtureImportError` schema for the builder to declare — raise `HTTPException(status_code=422, detail=...)` from the route after the engine signals a validation failure. (The Designer's Surfaces list mentions `FixtureImportError` informally; this contract is authoritative: default envelope only. The illustrative `{"error": ...}` dicts elsewhere in this section are the *value* of `detail`, not a separate response_model.)
+- **REPLACE semantics for children — CONFIRMED (the Designer's "highest-stakes" flag, resolved).** Import is *declarative desired-state*, not a merge. For each request the bundle declares, its `evaluations[]` **fully replace** that request's stored evaluation set — rows present in the DB but absent from the fixture are deleted (via the per-parent delete-all-then-reinsert). For each collection the bundle declares, its `items[]` **fully replace** that collection's stored item list — items added out-of-band via `POST /v1/collections/{id}/items` since the last import are discarded and order is rewritten to exactly the fixture's array order. This must be the first sentence of the endpoint's OpenAPI description and the headline of `fixtures/README.md`. Caveat: top-level `environments`/`requests`/`collections` are *upserted*, not replaced — import never deletes a request or collection the bundle doesn't mention; only *children of mentioned parents* get the replace treatment. (No deletes-on-import at the top level — matches the Manager's out-of-scope line.)
+- **All-or-nothing.** The whole import runs inside one `async with auth.db.transaction():`. One bad eval `kind` in a 50-request bundle rolls everything back — no partial state.
+- Records `events` row: `kind="fixtures.imported"`, `target_kind="fixtures"`, `target_id=NULL`, `payload={counts...}`.
 
-- **Source of vars (slice-2):** `api.environments.substitution.load_substitution_map(db, environment_id)` returns `{**variables, **decrypted_secrets}`. Engine seeds the run's substitution map with this dict.
-- **Substitution miss policy:** leave the literal `{{VAR}}` in the outgoing string (already implemented at `engine.py:40-44`). Engine tracks missed keys per request by serializing url+headers+body (`json.dumps(...)` on the post-substitution payload) and scanning with the **authoritative regex** `re.findall(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}", rendered_serialized)`. The captured names (deduplicated, order-preserved) become `RunRequestResult.substitution_missed`. Misses do NOT raise; they DO contribute to per-request failure only when an eval's expected value depends on the substituted value (no special "missing-var" error path). **UI consumes `substitution_missed` directly** — no client-side regex; the Designer's note about coloring `{{…}}` matches in the URL pulls from this field, not from re-parsing the rendered string.
-- **Captured vars (chaining `$.id` → `CREATED_ID` across requests):** the `requests` table has no `capture` column today (`api/shared/schema.sql:25-35`). Three options considered:
-  1. Add `requests.capture JSONB NOT NULL DEFAULT '{}'::jsonb` — body `{"CREATED_ID": "$.id"}`. Engine applies post-`_execute_request`, writes the result into `RunRequestResult.captured` and into the run-local `subs` map for subsequent requests.
-  2. Store captures on `collection_items.capture JSONB` — same request reused in different collections with different captures.
-  3. Punt capture this slice; document the gap; single-request claims (deploy + health check) still work.
-- **Recommendation: Option 1** (add to `requests`). Capture is a property of the request template, not its position. The reference seed harness in `~/github/pagehub-io/platform/evals/seeds/_shared.py:151` and the per-feature seed at `pagehub_evals_evaluations.py:63` already encode `capture={"PARENT_REQ_ID": "$.id"}` at request level — hanging captures elsewhere is inconsistent with the system we're modeling on. The schema bump is one `ADD COLUMN IF NOT EXISTS` line in `api/shared/schema.sql`, idempotent under the existing lifespan apply. **Authoring UI for `capture` is slice-3**; slice-2 ships only API access (and the seed file uses the API directly).
+#### `GET /v1/collections/{collection_id}/export`
+- Auth: `require_user` → 403 otherwise. (SPEC open question #4 resolved: operator-only; export is an authoring action and may surface request bodies/headers that include `{{SECRET}}` placeholders — fine, those are placeholders not values — but "authoring = operator" holds.)
+- 404 if the collection doesn't exist.
+- `200` with `FixtureBundle`: `version: 1`, `environments: []` (a collection has no canonical environment — see below), `requests: [...]` (every distinct request referenced by the collection's items, in *first-referenced* order), `collections: [{ name, description, items: [request names in position order] }]` (exactly one collection).
+- `environments` is always `[]` on export — *stated explicitly*: which environment a collection runs against is a run-time binding (`runs.environment_id`), not a property of the collection, and environments hold secrets we will not dump. An operator who wants the env in a fixture authors it by hand.
+- A collection with zero items exports `requests: []` and `collections: [{... "items": []}]` — round-trips fine.
+- `Content-Type: application/json`, served inline (no `Content-Disposition`) — consistent with the Designer's Surfaces note.
 
-### Verdict aggregation
+#### Canonical serialization + the round-trip normalization function
 
-Per request (computed in engine, written into `RunRequestResult.passed`):
+The acceptance contract — "export → import → export is identical modulo timestamps/ids" — is pinned to this exact normalization, applied to **both** export bundles before comparison. It lives in `api/fixtures/schemas.py` as `normalize_for_roundtrip(bundle: dict) -> dict` and is the single source of truth used by both the pytest test and the `platform/evals/seeds/` seed:
 
-```
-request.passed = (transport_error is None)
-              AND (evaluations is non-empty)
-              AND all(ev.passed for ev in evaluations)
-```
+1. Drop server-assigned fields wherever they appear: `id`, `request_id`, `collection_id`, `owner_user_id`, `created_at`, `updated_at`, `position` (positions are implied by array order; ids/timestamps are non-deterministic).
+2. `environments`: dropped entirely from the comparison (export emits `[]`, import of a collection-only bundle ignores absent envs — symmetric).
+3. `requests[].headers`, request `body` objects, evaluation `config`, environment `variables`: left as-is (Python dicts compare order-insensitively; a `body_eq`-style assertion that serializes to JSON must `json.dumps(..., sort_keys=True)`).
+4. `requests[]` sorted by `name`; `collections[]` sorted by `name`; `evaluations[]` within a request sorted by `name`; collection `items` kept in array order (order is meaningful).
+5. `version` copied through (must be `1` on both sides).
 
-Per run (single terminal UPDATE):
+Because export already emits requests in first-referenced order and the importer assigns `collection_items.position` densely from array index, a clean round-trip needs only steps 1, 4, 5 in practice — but the normalizer is defined to be robust to authored-by-hand input too.
 
-```
-if any(r.transport_error for r in requests):
-    verdict = "error"
-elif not any(r.evaluations for r in requests):     # nothing was actually checked
-    verdict = "error"
-elif all(r.passed for r in requests):
-    verdict = "passed"
-else:
-    verdict = "failed"
+Key emission order in the export response (FastAPI serializes Pydantic field order — just declare the models this way, no custom encoder): top level `version, environments, requests, collections`; within a request `name, method, url, headers, body, capture, evaluations`; within an evaluation `name, kind, config`; within a collection `name, description, items`. Gives stable, diff-friendly JSON for the checked-in fixture.
 
-status = verdict                                    # status mirrors verdict on terminal transition
-```
+#### Chess module HTTP contract (the eval target — must be drivable by the run engine: request templates + `{{VAR}}` + `capture` only, zero client-side logic)
 
-While in flight: `status='running'`, `verdict IS NULL`. The `status='pending'` window is the gap between INSERT and the engine's first UPDATE — typically <100ms but a real state and reported as-is.
+Mounted at `/v1/modules/chess` (component decision above). In `chess.json` the request templates use **one** environment variable for the host — `CHESS_BASE_URL` — so the URLs read `{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves` etc. (The full `/v1/modules/chess/...` prefix is part of the contract — request templates carry it literally; `CHESS_BASE_URL` is host-only. Pick `CHESS_BASE_URL` not `BASE_URL` so the fixture's intent is self-documenting; the bundled `chess-local` environment sets it to the instance's own origin — `http://localhost:8002` for local dev, the public Vercel URL when an operator runs it against staging/prod.)
 
-Note for manager (cross-section): manager's risk #3 (verdict='error' is too broad) is acknowledged but NOT split this slice — splitting "transport error" from "no evals defined" into distinct verdicts (`error` vs `misconfigured`) is a slice-3 schema bump.
+1. **`POST /v1/modules/chess/legal-moves`** — stateless legality oracle.
+   - Body `{ "fen": "<FEN string>" }`, `fen` **required** (no default — keeps the contract honest). Invalid FEN → `422` with detail.
+   - `200` → `{ "fen": "<echoed normalized FEN>", "legal_moves": ["e2e4", "g1f3", ...], "turn": "white"|"black", "is_game_over": bool }` — moves in **UCI long algebraic** (`e2e4`, `e7e8q`), sorted. (UCI not SAN: SAN needs board context to disambiguate and is harder for a harness to produce mechanically; and `body_contains` on the JSON array text gives a clean "is this move legal?" check.)
+   - How `chess-legality` uses it: the shipped fixture hard-codes a FEN and a known-good move, evaluates `body_contains { "needle": "<that move>" }` against the response (whose `legal_moves` includes it). SPEC says "eval checks the move is in `legal_moves`" — that's exactly this. (A "harness supplies the move" variant would need a second request to POST the move somewhere; not needed for the legality collection.)
 
-### Concurrency / execution model
+2. **`POST /v1/modules/chess/games`** — start a server-driven game.
+   - Body `{ "engine_color": "white"|"black", "seed": <int>?, "starting_fen": "<FEN>"? }`. `seed` defaults to a fixed constant (`0`) — see the playable-game note below for why it's in the body. `starting_fen` defaults to the standard start position. If `engine_color == "white"`, the server immediately makes the first move.
+   - `200` → `{ "game_id": "<uuid>", "fen": "<current FEN>", "turn": "white"|"black", "status": "in_progress", "engine_color": "white"|"black", "engine_move": "<uci>"|null, "move_history": ["<uci>", ...] }` (`engine_move` non-null iff the engine just moved, i.e. `engine_color == "white"`).
+   - The "engine" is deliberately trivial: **pick a uniformly random legal move**, RNG seeded by the request-body `seed`. It does NOT need to play well, only legally — SPEC: "validates the harness's side end-to-end", not "beats the harness".
 
-- **Slice-2:** `FastAPI BackgroundTasks` (in-process, per-uvicorn-worker, no durability). Acceptable for runs <30s end-to-end, which is the target shape (a handful of HTTP fires against a deployed system).
-- **Hard rules (engine.py):**
-  1. The row's `status='pending'` is written by the route in the same INSERT that creates the row (routes.py:72).
-  2. Engine acquires a connection, writes `status='running', started_at=now()` guarded `WHERE id=$1 AND status='pending'`. If 0 rows updated, abort silently (someone already started this run; re-fire defense).
-  3. Engine RELEASES the connection before any HTTP fire.
-  4. Engine fires all requests with NO DB connection held. **REQUIRED:** fetch all `requests` rows + their `evaluations` rows up front in one batched read (single connection, released before the first HTTP fire). No per-request DB acquires during the HTTP loop. This is the rule, not a preference — it bounds connection-pool pressure regardless of run length.
-  5. Engine re-acquires a connection for ONE atomic terminal UPDATE: `UPDATE runs SET status=$1, verdict=$2, evidence=$3::jsonb, finished_at=now() WHERE id=$4 AND status='running'`. Guard prevents double-write if a duplicate background dispatch fires on the same `run_id`.
-- **Worker-death gap (named, NOT built this slice):** a uvicorn restart mid-run leaves the row in `status='running'` forever. **Reliability must flag this in PLAN.** Slice-3 builds a reaper (`UPDATE runs SET status='error', verdict='error' WHERE status='running' AND started_at < now() - interval '5 minutes'`).
+3. **`POST /v1/modules/chess/games/{game_id}/moves`** — submit the harness's move; server replies.
+   - Body `{ "move": "<uci>" }`.
+   - `200` always for any *parseable* UCI string (no 4xx for an illegal-given-the-position move) → `{ "game_id": "<uuid>", "fen": "<current FEN>", "turn": "white"|"black", "status": "in_progress"|"illegal_move"|"harness_won"|"harness_lost"|"draw", "engine_move": "<uci>"|null, "move_history": ["<uci>", ...], "legal_moves": ["..."] }`.
+     - Illegal-given-position harness move → board unchanged, `status: "illegal_move"`, `engine_move: null`, `legal_moves` lists what *would* have been accepted (evidence).
+     - Legal harness move that ends the game (checkmate by harness / stalemate) → `status: "harness_won"` / `"draw"`, `engine_move: null`.
+     - Otherwise the server applies the harness move, makes its own random legal reply; if *that* ends the game → `"harness_lost"` / `"draw"`; else `"in_progress"`.
+   - `404` if `game_id` unknown. `422` only if `move` is *un-parseable* as UCI notation (not "illegal given the position" — that's `illegal_move` in the body). Routing "illegal given position" to a body `status` field makes the playable-game collection's evals uniform: every step asserts `json_path_eq $.status == "in_progress"` (or the terminal value on the last step), never a transport error.
+   - **How `chess-playable-game` is built as a run collection:** request 1 POSTs to `/games` with a known `seed` and `engine_color == "black"`, `capture`s `$.game_id` into `GAME_ID`; requests 2..n each POST to `/games/{{GAME_ID}}/moves` with a *hard-coded* harness (White) move from a *fixed scripted line*. The line is authorable precisely because the engine's RNG is seeded by the body's `seed` (NOT by `game_id`, which is server-assigned and unknowable at authoring time) — with a known seed the engine's (Black) replies are deterministic, so the author scripts a full legal line and each step's eval asserts the expected post-engine-reply `$.fen` / `$.status`. **This is the one subtle bit of the contract — flag for the builder: the engine seed comes from the request body, defaults to a constant, and the shipped `chess.json` relies on a documented seed+line.**
 
-### Idempotency & write-once
+   Auth on the chess module: **unauthenticated.** Deliberate — these endpoints hold no secrets, only ephemeral game state; they exist to be hit by the run engine, which does not auto-inject auth (it sends exactly the headers in the request template). Requiring auth would force every chess request template in `chess.json` to carry a `{{HARNESS_KEY}}` header sourced from an environment in the bundle — more moving parts, and `chess.json` couldn't run without first authoring that environment with a live key. A one-line comment in `api/modules/chess/routes.py`: "intentionally unauthenticated — eval target, not a protected resource." Not a precedent for the resource APIs.
 
-- `harness_claim`: written exactly once at INSERT (routes.py:67-83). No UPDATE path touches it. PATCH → 403 universally (routes.py:145-154). Eval seed asserts PATCH 403 from BOTH operator JWT and harness key.
-- `verdict`: engine-only. Terminal UPDATE in engine.py is the sole writer. Guard clause `WHERE status='running'` prevents re-writes from a stale background dispatch on the same `run_id`. (Narrower than `IN ('pending','running')` because the engine writes terminal only after the `pending → running` transition succeeded; matches Concurrency rule 5.)
-- `status`: engine-only after INSERT. Routes never UPDATE status.
-- `evidence`: engine-only at terminal UPDATE. Stays `{"requests": []}` between INSERT and terminal write.
-- `created_by_kind` / `created_by_id`: set from `AuthContext` at INSERT, immutable thereafter (no UPDATE path).
+### Integrations
 
-### Mobile architecture
+- **`requests` table — ADD a unique constraint `UNIQUE (owner_user_id, name)`.** "Upsert by name" demands it; without it `INSERT ... ON CONFLICT` has no arbiter and "re-import is idempotent" is impossible. Idempotent DDL in `api/shared/schema.sql` (Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so a `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'requests_owner_user_id_name_key') THEN ALTER TABLE requests ADD CONSTRAINT requests_owner_user_id_name_key UNIQUE (owner_user_id, name); END IF; END $$;` block, alongside the existing `ADD COLUMN IF NOT EXISTS capture`). The deployed DB is freshly scaffolded (slice-2 just landed, `runs` is a stub) — no duplicate-named rows to block the constraint, so plain `ADD CONSTRAINT` (not `NOT VALID` + later `VALIDATE`) is fine; PLAN should note that against a *dirty* DB a dedupe pass would be required first. Side effect: **`POST /v1/requests` (`api/requests/routes.py::create_request`) gains a `try/except asyncpg.UniqueViolationError → HTTPException(409)` wrapper around the INSERT.** Correction to an earlier draft of this section: there is **no `PATCH /v1/requests/{id}` route today** (the `UpdateRequestRequest` schema exists, the route doesn't) — nothing to change there. And this is **new** behavior, not a "mirror" — `POST /v1/collections` / `POST /v1/environments` / `PATCH /v1/environments/{id}` currently do *not* catch `UniqueViolationError` on `(owner_user_id, name)` either (they 500 on a duplicate name). Tightening those is out of scope for this slice; only `POST /v1/requests` is touched, because this slice is what introduces the constraint that makes the violation reachable. PLAN: list the `create_request` 409 catch as a discrete change.
+- **`environments`, `collections`** — already `UNIQUE (owner_user_id, name)`. Import uses `INSERT ... ON CONFLICT (owner_user_id, name) DO UPDATE SET ... RETURNING (xmax = 0) AS inserted` to get the created/updated flag in one round trip (`xmax = 0` ⇒ this was an INSERT, not an UPDATE — standard asyncpg trick).
+- **`evaluations`, `collection_items`** — no unique constraint, and we don't add one; both are *children* fully owned by their parent in the declarative model, so import does **delete-all-children-then-bulk-insert** per parent. We delete by `request_id` / `collection_id` explicitly inside the txn (the parent row survives — not relying on cascade). `collection_items.position` assigned `0..len(items)-1` from array index.
+- **`api/shared/secrets.py`** — `FixtureEnvironment.secrets` in the file are **keys-only with `""` values** (a non-empty value is rejected at parse time, 422 — see Contracts). On import the engine reads the *target* environment's existing `secrets` JSONB and, per fixture key: keeps the existing ciphertext if the key is already there; else writes `encrypt("")` as an unset placeholder. The `encrypt`/`decrypt` helpers are reused as-is; `decrypt` is never invoked on the import path, and export emits `environments: []`, so no secret material ever traverses the fixture boundary in either direction. (The "preserve existing ciphertext" half is trivially implementable: it's a dict merge over the loaded `secrets` JSONB before the UPDATE — no decrypt involved.)
+- **`api/shared/schema.sql` — new `chess_games` table** (small). Authoritative DDL lives in `api/shared/schema.sql` (and matches the chess-contract section above): columns `id`, `engine_color TEXT` (`CHECK IN ('white','black')`), `seed BIGINT` (engine RNG seed from the request body, default 0), `starting_fen TEXT` (FEN the game opened from, for replay), `fen TEXT` (current position), `move_history JSONB` (ordered UCI moves played, evidence + per-ply RNG replay), `move_count INTEGER` (== `jsonb_array_length(move_history)`), `status TEXT` (`CHECK IN ('in_progress','harness_won','harness_lost','draw')` — `illegal_move` is a transient response status, never persisted), `created_at`, `updated_at`. No owner column — games are unauthenticated and ephemeral; a slice-N reaper can `DELETE WHERE created_at < now() - interval '1 day'` (not this slice; note it).
+- **`api/runs/engine.py`** — unchanged. The chess collections are ordinary collections of ordinary requests; the engine already does `{{VAR}}` substitution and `capture`. The contract above is shaped *around* the engine's existing capabilities — notably: only `capture` can carry state between requests, so `game_id` MUST be a JSONPath-addressable top-level field in the `/games` response. If any engine change turns out to be needed, the chess contract is wrong, not the engine.
+- **`requirements.txt` AND `api/requirements.txt`** — add `chess==1.11.2` (pin the current stable; builder confirms exact version at implementation time) to **both** files, kept in sync per the comment at the top of `api/requirements.txt` (root file = dev/test superset; `api/` file = what Vercel bundles). `python-chess` is pure-Python, no native build — safe in the serverless function.
+- **`api/main.py`** — two new `include_router` lines: `fixtures_router` (`tags=["Fixtures"]`) and the chess router (`tags=["Modules: chess"]`). One new line in `api/collections/routes.py` for the `/export` sub-route.
+- **`api/shared/events.py`** — `record_event` called once per successful import (`fixtures.imported`). The chess module is the thing-under-test, not an authoring surface — it does **not** emit events (noise; the run that drives it already emits `run.*`).
+- **`platform/evals/seeds/` (separate repo, `~/github/pagehub-io/platform`)** — the round-trip *eval* (the SPEC's "checked-in eval asserting export→import→export identity") lands as `platform/evals/seeds/pagehub_evals_fixtures.py`: POST `fixtures/chess.json` to `/v1/fixtures/import`, GET `/v1/collections/{chess-legality}/export`, POST that back to `/v1/fixtures/import`, GET `/export` again, assert `normalize_for_roundtrip(a) == normalize_for_roundtrip(b)` in that layer's assertion vocabulary. Plus a *unit*-level guard inside this repo: `api/tests/test_fixtures_roundtrip.py` (pure pytest, no live server — drives `fixtures.engine` against a test DB, asserts the same equality). This split is intentional — SPEC says "eval coverage goes in `platform/evals/seeds/` as before" AND "add an eval that asserts exactly this": the platform seed is the *eval*, the pytest is the *fast regression guard*. **The platform seed is a sibling PR in a different repo; flag it in PLAN, do not block the pagehub-evals PR on it.**
 
-- **`mobile/app/(drawer)/runs.tsx`** — replace the stub. Run-list per designer spec. Server-side sort newest first; no client-side filtering this slice.
-- **`mobile/app/(drawer)/runs/[id].tsx`** — new dynamic route under the existing drawer group (designer's path; sits as a stack route off the drawer's `/runs`). Reads `GET /v1/runs/{id}`; auto-polls every 2s while `status in {pending, running}`.
-- **Data flow:** extend `mobile/services/api.ts` with `listRuns()`, `getRun(id)`, `createRun(body)`. Mirror server schemas as TypeScript interfaces (`Run`, `RunRequestResult`, `RunEvaluationResult`, `RunEvidence`). Strict mode, no `any` — types match `RunResponse` exactly. No new abstraction layer.
-- The Designer's `ThemeContext` token additions (`success`/`danger`/`warning`) are NOT architectural — pass through.
+### Trade-offs
 
-### Deferred to slice-3 (named so reviewers do not flag)
-
-- **Twin-zero-traffic evidence** — new eval-kind `twin_traffic_zero` slotting into `_KINDS`, plus harness-side assertion that the real dependency saw zero traffic for the request (per `CLAUDE.md` "Eval assertion" rule).
-- **Stale-run reaper** — `UPDATE runs SET status='error', verdict='error' WHERE status='running' AND started_at < now() - interval '5 minutes'`; Modal scheduled job or pg_cron.
-- **Operator triage UX** — filters (app, harness, status), search by `harness_claim` substring, harness drill-in (group by `harness_id`), re-run button.
-- **Capture-rule editor UI** — slice-2 ships only API access to `requests.capture`; seeds use the API directly.
-- **Verdict taxonomy split** — separating "transport error" from "no evaluations defined" into distinct verdicts (addresses manager risk #3).
-- **Pagination on `GET /v1/runs`** — currently fixed `LIMIT 500`.
-- **Durable execution** — swap `BackgroundTasks` for Modal worker.
-- **Bracket-quoted JSONPath keys** (`$['a.b']`) in `_resolve_path`.
-
-### Resolutions
-
-- **Harness self-read scope:** own-runs-only (current `routes.py:137-138` behavior stays; harness keys see only rows they created).
-- **`harness_claim` size cap:** 10 000 chars stays (agents summarize at the boundary).
-- **`collection_id IS NULL` run semantics:** route accepts the POST; engine runs with zero requests; verdict = `error` with `evidence.requests = []` and `harness_claim` preserved.
-- **Capture-rule schema location:** Option 1 — add `requests.capture JSONB NOT NULL DEFAULT '{}'::jsonb` to `api/shared/schema.sql`, surfaced in `api/requests/{schemas,routes}.py`. Authoring UI is slice-3.
+- **`requests` gets `UNIQUE (owner_user_id, name)`** — chose this over "name-uniqueness scoped to within-a-single-import-bundle". The bundle-scoped alternative would let `POST /v1/requests` keep creating duplicate-named rows and then import would have to *guess* which one to update (or error on ambiguity), and `GET /collections/{id}/export` becomes ambiguous (which `chess-legality-probe` did the item reference?). The constraint is the simpler invariant. Accepted risk: a populated DB with pre-existing duplicate names blocks the migration — not a concern here (fresh scaffold), but PLAN notes that against a dirty DB a dedupe step is needed first. Also accepted: `POST /v1/requests` can now 409 on a duplicate name — a behavior change for an endpoint with essentially no real callers yet; `create_request` gets a `try/except asyncpg.UniqueViolationError → 409`. (No `PATCH /v1/requests/{id}` exists, so nothing else to touch; the sibling `POST`s on collections/environments don't currently catch this and we're not changing them in this slice.)
+- **Bundle-only request-name resolution** (reject items referencing requests not in the bundle) over "fall back to stored requests" — chose determinism/self-containment over flexibility. A "collections-only" fixture becomes illegal; that's a feature, because the fallback makes the same fixture produce different results on different instances depending on what's already there — the exact failure mode this feature exists to prevent.
+- **`version: 1` field reserved now** vs. omit-it-YAGNI — chose to reserve. One field, zero cost, and it's the difference between "we can evolve the format" and "every consumer breaks the day we need to". SPEC's "no versioned/migratable schema" is about not building *migration tooling* this slice — reserving the discriminator is orthogonal and cheap.
+- **Array index == `collection_items.position`** vs. explicit `position` ints in the file — chose array index. Positions in a fixture are always dense `0..n-1`; an explicit field invites the file to disagree with itself (gaps, dupes, out-of-order) and forces validation for no expressive gain. The importer assigns positions; export emits items in position order; the array *is* the order.
+- **No `unchanged` and no `deleted` count** in the import response — chose `{created, updated}` + `warnings` only. `unchanged` needs a per-row before/after value comparison; operators act on "did anything get created" (drift) and "is it idempotent" (`created: 0` on re-run), both answered by `created`+`updated`. `deleted` would be misleading given delete-all-then-reinsert for children. Add either later if someone actually wants it.
+- **Secrets in a fixture = keys-only with `""` values; non-empty value = hard 422; import preserves existing ciphertext / writes an unset placeholder for new keys** — chose this (the Designer's annotation) over "plaintext secret values, importer Fernet-encrypts" (an earlier sketch in this section). A fixture is a git-tracked declarative artifact: it must never carry decrypted secret material, full stop. And it couldn't round-trip anyway — Fernet ciphertext is non-deterministic, so an `export → import → export` of a bundle with real secrets would never be byte-stable. The cost is a one-directional asymmetry (a hand-authored fixture can name secret *keys* but never *fill* them; the operator finishes the job via `PATCH /v1/environments/{id}`) — acceptable, and export emitting `environments: []` means the asymmetry only ever bites hand-authored bundles, with the 422 as the guardrail.
+- **Chess engine = uniformly-random legal move, seeded via a request-body `seed` (default 0)** over (a) `game_id`-seeded (un-authorable: `game_id` is server-assigned) or (b) a real engine (overkill, slow, non-deterministic, and "play *legally*" is the whole bar). The seeded-RNG-from-body choice is the only one that lets a fixture author script a full legal line and assert each `$.fen`. Cost: the chess README must document the canonical seed/line used by `chess.json`, and "seed in body" is a slightly non-obvious bit of the contract — flagged for the builder.
+- **`chess_games` table** over in-memory dict — chose durable. Serverless cold starts and `uvicorn --reload` would otherwise drop a game mid-`chess-playable-game` run and the run engine would see a `404` halfway through (→ `error` verdict, flaky eval). The table is tiny and pays for itself the first time a deploy lands during a run. Accepted: it accretes rows until a reaper exists (slice-N) — bounded, harmless, noted.
+- **Chess module unauthenticated** over auth-via-`{{HARNESS_KEY}}`-from-environment — chose unauthenticated. The run engine doesn't auto-inject auth, so auth here would mean every chess request template carries an env-sourced key header and `chess.json` can't run without first authoring that environment with a live key — friction with no security benefit (no secrets behind these endpoints). Documented as a deliberate "eval target, not a protected resource" decision; not a precedent for the resource APIs.
+- **Export omits `environments`** (`always []`) over "dump the environments the collection has been run against" — a collection has no canonical environment (it's a run-time binding on `runs`, possibly several), and environments hold Fernet secrets we will not export. An operator who wants the environment in a fixture writes it by hand. Stated in the contract so the round-trip eval doesn't expect them.
+- **Single all-or-nothing transaction** for import (`async with auth.db.transaction():` around the whole engine call) over per-resource commits — a partially-applied fixture is worse than a cleanly-rejected one; "import is idempotent" implies "import is atomic". asyncpg's connection-scoped transaction is exactly the tool. Cost: a huge bundle holds one connection for the duration — fine at this scale (`chess.json` is a handful of rows; pool size is 10).
 
 AGREE: yes
+NIT: add `api/modules/chess/README.md` (or `fixtures/README.md` §chess) documenting the canonical engine `seed` + scripted move line for `chess-playable-game` — PLAN should assign an owner; the fixture's per-step `$.fen` evals are meaningless without the documented line.
+NIT (builder note): "engine RNG seeded by the body `seed`" needs per-ply determinism, not just per-game — each `/games/{id}/moves` call reconstructs the engine's choice freshly, so the engine must derive its move from `(seed, ply_index)` (e.g. `random.Random(hash((seed, ply)))` over the sorted legal-move list, or replay the stored `moves` history to re-advance one RNG) rather than `random.Random(seed)` once. Implementation detail; flagging so it isn't discovered the hard way when the scripted line doesn't reproduce.

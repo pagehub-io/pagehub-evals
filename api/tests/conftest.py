@@ -25,17 +25,29 @@ _TEST_ENV = {
     "APP_SLUG": "pagehub-evals",
     "RUNS_ENABLED": "true",
     "DATABASE_URL": "postgresql://test:test@localhost/test",
-    "ENCRYPTION_KEY": "ZmVybmV0LXRlc3Qta2V5LTMyLWJ5dGVzLWJhc2U2NA==",
+    # A *valid* 32-byte url-safe-base64 Fernet key (the previous test value
+    # decoded to 31 bytes and Fernet rejected it — only mattered once a test
+    # actually called encrypt()). Same key as docker-compose's dev value.
+    "ENCRYPTION_KEY": "6bzQXvxLe_oere1FNN-mWtRwyQXFUJBaOw_R7iYvcX8=",
     "ADMIN_EMAILS": "support@pagehub.io",
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)
 
+# DATABASE_URL is special: DB-backed tests (api/tests/_db.py) connect to it
+# directly, and CI provides a real one. The per-test monkeypatch below must
+# NOT clobber an externally-set value — only fall back to the bogus default
+# when nothing real is configured (the no-DB unit run).
+_PRESERVE_FROM_ENV = {"DATABASE_URL"}
+
 
 @pytest.fixture(autouse=True)
 def _scaffold_env(monkeypatch):
     for k, v in _TEST_ENV.items():
-        monkeypatch.setenv(k, v)
+        if k in _PRESERVE_FROM_ENV:
+            monkeypatch.setenv(k, os.environ.get(k, v))
+        else:
+            monkeypatch.setenv(k, v)
     reset_settings()
     yield
     reset_settings()

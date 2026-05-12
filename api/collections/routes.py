@@ -17,6 +17,8 @@ from api.collections.schemas import (
     CreateCollectionRequest,
 )
 from api.dependencies import AuthContext, require_user
+from api.fixtures.engine import FixtureImportError, build_export
+from api.fixtures.schemas import FixtureBundle
 from api.shared.events import record_event
 
 router = APIRouter(prefix="/v1/collections")
@@ -107,6 +109,20 @@ async def get_collection(
     if row is None:
         raise HTTPException(status_code=404, detail="Collection not found")
     return await _row_to_response(auth.db, row)
+
+
+@router.get("/{collection_id}/export", response_model=FixtureBundle)
+async def export_collection(
+    collection_id: UUID,
+    auth: AuthContext = Depends(require_user),
+) -> FixtureBundle:
+    """Project this collection (+ its requests + their evaluations) into a
+    fixture bundle. ``environments`` is always ``[]`` (a collection has no
+    canonical environment). Served inline as ``application/json``."""
+    try:
+        return await build_export(auth.db, collection_id)
+    except FixtureImportError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
 
 
 @router.post(

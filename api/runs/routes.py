@@ -15,6 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from api.config import get_settings
 from api.dependencies import AuthContext, require_auth, require_user
+from api.runs._constants import COLLECTION_ITEM_CAP
 from api.runs.engine import execute_run
 from api.runs.schemas import (
     CreateRunRequest,
@@ -27,8 +28,6 @@ from api.runs.schemas import (
 from api.shared.events import record_event
 
 router = APIRouter(prefix="/v1/runs")
-
-_COLLECTION_ITEM_CAP = 50
 
 
 def _gate() -> None:
@@ -75,11 +74,11 @@ async def create_run(
             "SELECT count(*) FROM collection_items WHERE collection_id = $1",
             body.collection_id,
         )
-        if item_count is not None and item_count > _COLLECTION_ITEM_CAP:
+        if item_count is not None and item_count > COLLECTION_ITEM_CAP:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"collection exceeds max items={_COLLECTION_ITEM_CAP} "
+                    f"collection exceeds max items={COLLECTION_ITEM_CAP} "
                     f"(got {item_count})"
                 ),
             )
