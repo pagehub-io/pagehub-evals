@@ -84,25 +84,6 @@ CREATE TABLE IF NOT EXISTS collection_items (
 );
 CREATE INDEX IF NOT EXISTS collection_items_collection_idx ON collection_items (collection_id);
 
--- Server-driven chess games for the in-repo chess module (api/modules/chess).
--- Durable on purpose: a deploy landing mid-run must not drop the board.
--- Unauthenticated / anonymous — no owner column; rows are ephemeral-ish and a
--- slice-N reaper can prune by created_at (not this slice).
-CREATE TABLE IF NOT EXISTS chess_games (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    engine_color  TEXT NOT NULL CHECK (engine_color IN ('white', 'black')),  -- side the server engine plays
-    seed          BIGINT NOT NULL,                     -- engine RNG seed, from the /games request body (default 0)
-    starting_fen  TEXT NOT NULL,                       -- FEN the game opened from (startpos by default) — for replay
-    fen           TEXT NOT NULL,                       -- current position
-    move_history  JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ordered UCI moves played (both sides); evidence + per-ply RNG replay
-    move_count    INTEGER NOT NULL DEFAULT 0,          -- == jsonb_array_length(move_history); the ply index
-    -- 'illegal_move' is a transient response status, never persisted — not in this set.
-    status        TEXT NOT NULL DEFAULT 'in_progress'
-                  CHECK (status IN ('in_progress', 'harness_won', 'harness_lost', 'draw')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- Per-harness API keys. Each LLM agent (or harness installation) gets
 -- a key minted by an operator; the secret is hashed at rest (Fernet
 -- can't be used here because we need constant-time compare not

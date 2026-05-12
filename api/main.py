@@ -15,7 +15,6 @@ from api.events.routes import router as events_router
 from api.fixtures._body_limit import FixtureBodyLimitMiddleware
 from api.fixtures.routes import router as fixtures_router
 from api.harness_keys.routes import router as harness_keys_router
-from api.modules.chess.routes import router as chess_router
 from api.requests.routes import router as requests_router
 from api.runs.routes import router as runs_router
 from api.shared.db import close_pool, init_pool
@@ -115,7 +114,6 @@ app.include_router(collections_router, tags=["Collections"])
 app.include_router(fixtures_router, tags=["Fixtures"])
 app.include_router(runs_router, tags=["Runs"])
 app.include_router(events_router, tags=["Events"])
-app.include_router(chess_router, tags=["Modules: chess"])
 
 
 @app.get("/")

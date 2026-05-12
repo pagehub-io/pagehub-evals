@@ -13,6 +13,20 @@ bearing **runs** are the product.
 > Status: **scaffolding only.** This file documents the target shape; the JTBD
 > implementation lands in a follow-up.
 
+## Pure evals — no in-repo targets
+
+**Pagehub-evals is a pure evals app: it must never host the system under
+test.** No in-repo "modules", demo endpoints, fixture-specific services, or
+toy targets. The thing an eval suite exercises is *always* an external,
+separately-deployed system reached over HTTP — request templates point at it
+via an environment variable (e.g. `{{BASE_URL}}`), never at a route hosted
+here. (An early `api/modules/chess/` "eval target" was a mistake and was
+removed; a chess conformance suite, when it returns, will be a fixture
+against a separately-deployed chess service.) The only HTTP surfaces this app
+exposes are its own product surfaces — environments, requests, evaluations,
+collections, fixtures, runs, harness keys, events — plus health/metrics. New
+endpoints that exist *to be tested by* a fixture do not belong in this repo.
+
 ## Surfaces
 
 1. **Standalone site** (Expo web on Cloudflare Pages) — operator triage UI for

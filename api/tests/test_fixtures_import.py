@@ -22,11 +22,11 @@ from api.main import app
 from api.shared.db import get_db
 from api.tests._db import db_pool  # noqa: F401
 
-CHESS_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "chess.json"
+EXAMPLE_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "example.json"
 
 
-def _load_chess_bundle() -> dict:
-    return json.loads(CHESS_FIXTURE.read_text())
+def _load_example_bundle() -> dict:
+    return json.loads(EXAMPLE_FIXTURE.read_text())
 
 
 # ---------- tier 1: parse-time / auth — no DB ----------
@@ -246,22 +246,22 @@ def _import(client, bundle: dict):
     return client.post("/v1/fixtures/import", json=bundle)
 
 
-def test_import_happy_path_chess(db_pool) -> None:  # noqa: F811
-    bundle = _load_chess_bundle()
+def test_import_happy_path_example(db_pool) -> None:  # noqa: F811
+    bundle = _load_example_bundle()
     with operator_test_client(db_pool) as client:
         r = _import(client, bundle)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["environments"] == {"created": 1, "updated": 0}
+        assert body["environments"] == {"created": len(bundle["environments"]), "updated": 0}
         assert body["requests"]["created"] == len(bundle["requests"])
         assert body["requests"]["updated"] == 0
         n_evals = sum(len(req["evaluations"]) for req in bundle["requests"])
         assert body["evaluations"] == {"created": n_evals, "updated": 0}
-        assert body["collections"] == {"created": 2, "updated": 0}
+        assert body["collections"] == {"created": len(bundle["collections"]), "updated": 0}
 
 
 def test_reimport_is_idempotent(db_pool) -> None:  # noqa: F811
-    bundle = _load_chess_bundle()
+    bundle = _load_example_bundle()
     with operator_test_client(db_pool) as client:
         assert _import(client, bundle).status_code == 200
         r2 = _import(client, bundle)
