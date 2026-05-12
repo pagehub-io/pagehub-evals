@@ -2,6 +2,8 @@
 
 Authoring is operator-only. URL/headers/body all support {{VAR}}
 placeholders that the run engine fills in from the bound environment.
+Per-request ``capture`` rules feed JSONPath-lite extracts from each
+response into the run-local substitution map for downstream requests.
 """
 
 import json
@@ -30,6 +32,11 @@ def _row_to_response(row) -> RequestResponse:
             body = json.loads(body)
         except json.JSONDecodeError:
             pass
+    capture_raw = row["capture"] if "capture" in row.keys() else {}
+    if capture_raw is None:
+        capture_raw = {}
+    if isinstance(capture_raw, str):
+        capture_raw = json.loads(capture_raw)
     return RequestResponse(
         id=row["id"],
         name=row["name"],
@@ -37,6 +44,7 @@ def _row_to_response(row) -> RequestResponse:
         url=row["url"],
         headers=headers,
         body=body,
+        capture=capture_raw,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -49,9 +57,9 @@ async def create_request(
 ) -> RequestResponse:
     row = await auth.db.fetchrow(
         """
-        INSERT INTO requests (owner_user_id, name, method, url, headers, body)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
-        RETURNING id, name, method, url, headers, body, created_at, updated_at
+        INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+        RETURNING id, name, method, url, headers, body, capture, created_at, updated_at
         """,
         auth.actor_id,
         body.name,
@@ -59,6 +67,7 @@ async def create_request(
         body.url,
         json.dumps(body.headers),
         json.dumps(body.body) if body.body is not None else None,
+        json.dumps(body.capture),
     )
     await record_event(
         auth.db,
@@ -78,7 +87,7 @@ async def list_requests(
 ) -> RequestListResponse:
     rows = await auth.db.fetch(
         """
-        SELECT id, name, method, url, headers, body, created_at, updated_at
+        SELECT id, name, method, url, headers, body, capture, created_at, updated_at
         FROM requests
         ORDER BY created_at DESC
         LIMIT 500
@@ -94,7 +103,7 @@ async def get_request(
 ) -> RequestResponse:
     row = await auth.db.fetchrow(
         """
-        SELECT id, name, method, url, headers, body, created_at, updated_at
+        SELECT id, name, method, url, headers, body, capture, created_at, updated_at
         FROM requests
         WHERE id = $1
         """,

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS requests (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS requests_owner_idx ON requests (owner_user_id);
 
 -- Per-request response assertions. Multiple per request.
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_actor_idx ON runs (created_by_kind, created_by_id);
 CREATE INDEX IF NOT EXISTS runs_collection_idx ON runs (collection_id);
 CREATE INDEX IF NOT EXISTS runs_status_idx ON runs (status);
+CREATE INDEX IF NOT EXISTS runs_created_at_idx ON runs (created_at DESC);
 
 -- Immutable audit trail. Append-only — no UPDATE / DELETE handlers.
 -- actor_kind is "user" | "harness_key" | "system".
