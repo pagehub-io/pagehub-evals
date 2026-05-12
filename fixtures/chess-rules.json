@@ -1,0 +1,1522 @@
+{
+  "collections": [
+    {
+      "description": "Chess rule-conformance battery for the eval-chess-backend FastAPI service (POST/GET /games, /games/{id}/moves, /legal-moves, /health, /metrics). Covers: legal & illegal moves (board left unchanged, move_history empty on rejection); kingside & queenside castling; castling-rights respected (kingside disallowed when the K right is absent in the FEN); cannot castle through an attacked square; en passant offered when the FEN's ep square is set and not when it is cleared, and the capture applies; promotion incl. underpromotion; a pinned piece cannot move; a move leaving one's own king in check is rejected; checkmate -> white_won; stalemate -> draw; the 50-move rule (start at halfmove clock 99) -> draw; threefold repetition (knight shuffle) -> draw; 404 for an unknown game; 422 for an unparseable move and for a bad FEN. All FENs and legal-move lists are python-chess-derived; draw assertions assume claim-aware game-over detection (board.is_game_over(claim_draw=True)).",
+      "items": [
+        "chess-01-health",
+        "chess-02-metrics",
+        "chess-03-create-legal",
+        "chess-04-legal-move-e2e4",
+        "chess-05-get-game-after-e4",
+        "chess-06-create-illegal",
+        "chess-07-illegal-move-rejected",
+        "chess-08-unparseable-move-422",
+        "chess-09-unknown-game-move-404",
+        "chess-10-create-castle-k",
+        "chess-11-castle-kingside",
+        "chess-12-create-castle-q",
+        "chess-13-castle-queenside",
+        "chess-14-create-castle-rights",
+        "chess-15-castle-k-disallowed",
+        "chess-16-castle-q-still-ok",
+        "chess-17-create-castle-through-check",
+        "chess-18-castle-through-check-rejected",
+        "chess-19-legal-moves-ep-available",
+        "chess-20-legal-moves-ep-gone",
+        "chess-21-create-ep-game",
+        "chess-22-en-passant-capture",
+        "chess-23-create-promo-q",
+        "chess-24-promotion-queen",
+        "chess-25-create-promo-n",
+        "chess-26-underpromotion-knight",
+        "chess-27-create-pin",
+        "chess-28-pinned-piece-cannot-move",
+        "chess-29-create-incheck",
+        "chess-30-move-into-check-rejected",
+        "chess-31-create-mate",
+        "chess-32-checkmate-terminal",
+        "chess-33-create-stalemate",
+        "chess-34-stalemate-draw",
+        "chess-35-create-fifty-move",
+        "chess-36-fifty-move-draw",
+        "chess-37-create-threefold",
+        "chess-38-threefold-move-0",
+        "chess-39-threefold-move-1",
+        "chess-40-threefold-move-2",
+        "chess-41-threefold-move-3",
+        "chess-42-threefold-move-4",
+        "chess-43-threefold-move-5",
+        "chess-44-threefold-move-6",
+        "chess-45-threefold-move-7",
+        "chess-46-bad-fen-create-422",
+        "chess-47-bad-fen-legal-moves-422"
+      ],
+      "name": "chess-rules"
+    }
+  ],
+  "environments": [
+    {
+      "name": "chess-local",
+      "secrets": {},
+      "variables": {
+        "eval-chess-backend_url": "http://localhost:8003"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "health-200"
+        },
+        {
+          "config": {
+            "expected": "ok",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "health-status-ok"
+        },
+        {
+          "config": {
+            "needle": "commit"
+          },
+          "kind": "body_contains",
+          "name": "health-has-commit"
+        }
+      ],
+      "method": "GET",
+      "name": "chess-01-health",
+      "url": "{{eval-chess-backend_url}}/health"
+    },
+    {
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "metrics-200"
+        }
+      ],
+      "method": "GET",
+      "name": "chess-02-metrics",
+      "url": "{{eval-chess-backend_url}}/metrics"
+    },
+    {
+      "body": {
+        "starting_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+      },
+      "capture": {
+        "GAME_LEGAL": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-legal-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-legal-status"
+        },
+        {
+          "config": {
+            "expected": "white",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "create-legal-turn"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "create-legal-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-03-create-legal",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e2e4"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "legal-move-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "legal-move-legal"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "legal-move-fen"
+        },
+        {
+          "config": {
+            "expected": "black",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "legal-move-turn"
+        },
+        {
+          "config": {
+            "expected": [
+              "e2e4"
+            ],
+            "path": "$.move_history"
+          },
+          "kind": "json_path_eq",
+          "name": "legal-move-history"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-04-legal-move-e2e4",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_LEGAL}}/moves"
+    },
+    {
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "get-game-200"
+        },
+        {
+          "config": {
+            "expected": [
+              "e2e4"
+            ],
+            "path": "$.move_history"
+          },
+          "kind": "json_path_eq",
+          "name": "get-game-history"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "get-game-status"
+        },
+        {
+          "config": {
+            "expected": "a7a5",
+            "path": "$.legal_moves[0]"
+          },
+          "kind": "json_path_eq",
+          "name": "get-game-legal0"
+        }
+      ],
+      "method": "GET",
+      "name": "chess-05-get-game-after-e4",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_LEGAL}}"
+    },
+    {
+      "body": {
+        "starting_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+      },
+      "capture": {
+        "GAME_ILLEGAL": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-illegal-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-illegal-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-06-create-illegal",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e2e5"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "illegal-move-200"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "illegal-move-not-legal"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "illegal-move-fen-unchanged"
+        },
+        {
+          "config": {
+            "expected": [],
+            "path": "$.move_history"
+          },
+          "kind": "json_path_eq",
+          "name": "illegal-move-history-empty"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-07-illegal-move-rejected",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_ILLEGAL}}/moves"
+    },
+    {
+      "body": {
+        "move": "banana"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 422
+          },
+          "kind": "status_eq",
+          "name": "unparseable-422"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-08-unparseable-move-422",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_ILLEGAL}}/moves"
+    },
+    {
+      "body": {
+        "move": "e2e4"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 404
+          },
+          "kind": "status_eq",
+          "name": "unknown-game-move-404"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-09-unknown-game-move-404",
+      "url": "{{eval-chess-backend_url}}/games/this-game-does-not-exist/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+      },
+      "capture": {
+        "GAME_CK": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-castle-k-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-castle-k-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-10-create-castle-k",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "castle-k-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-k-legal"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R4RK1 b kq - 1 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-k-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-11-castle-kingside",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_CK}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+      },
+      "capture": {
+        "GAME_CQ": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-castle-q-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-castle-q-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-12-create-castle-q",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e1c1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "castle-q-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-q-legal"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/2KR3R b kq - 1 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-q-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-13-castle-queenside",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_CQ}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w Qkq - 0 1"
+      },
+      "capture": {
+        "GAME_CR": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-castle-rights-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-castle-rights-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-14-create-castle-rights",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "castle-k-disallowed-200"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-k-disallowed-legal"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w Qkq - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-k-disallowed-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-15-castle-k-disallowed",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_CR}}/moves"
+    },
+    {
+      "body": {
+        "move": "e1c1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "castle-q-still-ok-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-q-still-ok-legal"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/2KR3R b kq - 1 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-q-still-ok-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-16-castle-q-still-ok",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_CR}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "4k3/8/8/8/8/8/5r2/R3K2R w KQ - 0 1"
+      },
+      "capture": {
+        "GAME_TC": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-castle-tc-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-castle-tc-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-17-create-castle-through-check",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "castle-tc-200"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-tc-legal"
+        },
+        {
+          "config": {
+            "expected": "4k3/8/8/8/8/8/5r2/R3K2R w KQ - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "castle-tc-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-18-castle-through-check-rejected",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_TC}}/moves"
+    },
+    {
+      "body": {
+        "fen": "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ep-available-200"
+        },
+        {
+          "config": {
+            "expected": "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-available-fen"
+        },
+        {
+          "config": {
+            "expected": [
+              "e1d1",
+              "e1d2",
+              "e1e2",
+              "e1f1",
+              "e1f2",
+              "e5d6",
+              "e5e6"
+            ],
+            "path": "$.legal_moves"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-available-legal-moves"
+        },
+        {
+          "config": {
+            "expected": "white",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-available-turn"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.is_game_over"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-available-not-over"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-19-legal-moves-ep-available",
+      "url": "{{eval-chess-backend_url}}/legal-moves"
+    },
+    {
+      "body": {
+        "fen": "4k3/8/8/3pP3/8/8/8/4K3 w - - 0 2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ep-gone-200"
+        },
+        {
+          "config": {
+            "expected": [
+              "e1d1",
+              "e1d2",
+              "e1e2",
+              "e1f1",
+              "e1f2",
+              "e5e6"
+            ],
+            "path": "$.legal_moves"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-gone-legal-moves"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-20-legal-moves-ep-gone",
+      "url": "{{eval-chess-backend_url}}/legal-moves"
+    },
+    {
+      "body": {
+        "starting_fen": "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2"
+      },
+      "capture": {
+        "GAME_EP": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-ep-200"
+        },
+        {
+          "config": {
+            "expected": "white",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "create-ep-turn"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-21-create-ep-game",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e5d6"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "ep-capture-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-capture-legal"
+        },
+        {
+          "config": {
+            "expected": "4k3/8/3P4/8/8/8/8/4K3 b - - 0 2",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "ep-capture-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-22-en-passant-capture",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_EP}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "8/1P6/8/8/4k3/8/8/4K3 w - - 0 1"
+      },
+      "capture": {
+        "GAME_PQ": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-promo-q-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-promo-q-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-23-create-promo-q",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "b7b8q"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "promo-q-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-q-legal"
+        },
+        {
+          "config": {
+            "expected": "1Q6/8/8/8/4k3/8/8/4K3 b - - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-q-fen"
+        },
+        {
+          "config": {
+            "expected": "black",
+            "path": "$.turn"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-q-turn"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-q-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-24-promotion-queen",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_PQ}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "8/1P6/8/8/4k3/8/8/4K3 w - - 0 1"
+      },
+      "capture": {
+        "GAME_PN": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-promo-n-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-promo-n-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-25-create-promo-n",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "b7b8n"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "promo-n-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-n-legal"
+        },
+        {
+          "config": {
+            "expected": "1N6/8/8/8/4k3/8/8/4K3 b - - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "promo-n-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-26-underpromotion-knight",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_PN}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1"
+      },
+      "capture": {
+        "GAME_PIN": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-pin-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-pin-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-27-create-pin",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e2c3"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "pin-200"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "pin-legal"
+        },
+        {
+          "config": {
+            "expected": "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "pin-fen-unchanged"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-28-pinned-piece-cannot-move",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_PIN}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "4r3/8/8/8/8/2k5/8/4K3 w - - 0 1"
+      },
+      "capture": {
+        "GAME_IC": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-incheck-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-incheck-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-29-create-incheck",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "e1e2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "incheck-200"
+        },
+        {
+          "config": {
+            "expected": false,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "incheck-legal"
+        },
+        {
+          "config": {
+            "expected": "4r3/8/8/8/8/2k5/8/4K3 w - - 0 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "incheck-fen-unchanged"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-30-move-into-check-rejected",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_IC}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1"
+      },
+      "capture": {
+        "GAME_M": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-mate-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-mate-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-31-create-mate",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "a1a8"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "mate-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "mate-legal"
+        },
+        {
+          "config": {
+            "expected": "white_won",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "mate-status-white-won"
+        },
+        {
+          "config": {
+            "expected": "R5k1/5ppp/8/8/8/8/8/4K3 b - - 1 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "mate-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-32-checkmate-terminal",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_M}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "7k/8/6K1/5Q2/8/8/8/8 w - - 0 1"
+      },
+      "capture": {
+        "GAME_S": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-stalemate-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-stalemate-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-33-create-stalemate",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "f5f7"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "stalemate-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "stalemate-legal"
+        },
+        {
+          "config": {
+            "expected": "draw",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "stalemate-status-draw"
+        },
+        {
+          "config": {
+            "expected": "7k/5Q2/6K1/8/8/8/8/8 b - - 1 1",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "stalemate-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-34-stalemate-draw",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_S}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "4k3/8/8/8/8/8/8/R3K3 w - - 99 60"
+      },
+      "capture": {
+        "GAME_50": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-fifty-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-fifty-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-35-create-fifty-move",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "a1a2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "fifty-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "fifty-legal"
+        },
+        {
+          "config": {
+            "expected": "draw",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "fifty-status-draw"
+        },
+        {
+          "config": {
+            "expected": "4k3/8/8/8/8/8/R7/4K3 b - - 100 60",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "fifty-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-36-fifty-move-draw",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_50}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+      },
+      "capture": {
+        "GAME_3F": "$.game_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "create-threefold-200"
+        },
+        {
+          "config": {
+            "expected": "in_progress",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "create-threefold-status"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-37-create-threefold",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "move": "g1f3"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-0-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-0-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-38-threefold-move-0",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "g8f6"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-1-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-1-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-39-threefold-move-1",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "f3g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-2-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-2-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-40-threefold-move-2",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "f6g8"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-3-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-3-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-41-threefold-move-3",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "g1f3"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-4-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-4-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-42-threefold-move-4",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "g8f6"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-5-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-5-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-43-threefold-move-5",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "f3g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-6-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-6-legal"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-44-threefold-move-6",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "move": "f6g8"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "threefold-move-7-200"
+        },
+        {
+          "config": {
+            "expected": true,
+            "path": "$.legal"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-move-7-legal"
+        },
+        {
+          "config": {
+            "expected": "draw",
+            "path": "$.status"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-final-status-draw"
+        },
+        {
+          "config": {
+            "expected": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 8 5",
+            "path": "$.fen"
+          },
+          "kind": "json_path_eq",
+          "name": "threefold-final-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-45-threefold-move-7",
+      "url": "{{eval-chess-backend_url}}/games/{{GAME_3F}}/moves"
+    },
+    {
+      "body": {
+        "starting_fen": "this-is-not-a-fen"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 422
+          },
+          "kind": "status_eq",
+          "name": "bad-fen-create-422"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-46-bad-fen-create-422",
+      "url": "{{eval-chess-backend_url}}/games"
+    },
+    {
+      "body": {
+        "fen": "totally bogus !!"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 422
+          },
+          "kind": "status_eq",
+          "name": "bad-fen-legal-moves-422"
+        }
+      ],
+      "method": "POST",
+      "name": "chess-47-bad-fen-legal-moves-422",
+      "url": "{{eval-chess-backend_url}}/legal-moves"
+    }
+  ],
+  "version": 1
+}
