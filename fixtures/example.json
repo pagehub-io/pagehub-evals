@@ -1,0 +1,67 @@
+{
+  "collections": [
+    {
+      "description": "A trivial example fixture: two httpbin requests with status assertions. Imported by the fixture round-trip test and the platform fixtures eval-seed; an external eval target (e.g. a deployed app under test) would replace these placeholder requests.",
+      "items": [
+        "example-get",
+        "example-status-418"
+      ],
+      "name": "example-smoke"
+    }
+  ],
+  "environments": [
+    {
+      "name": "example-env",
+      "secrets": {},
+      "variables": {
+        "BASE_URL": "https://httpbin.org"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "body": null,
+      "capture": {},
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "status-ok"
+        },
+        {
+          "config": {
+            "needle": "httpbin"
+          },
+          "kind": "body_contains",
+          "name": "echoes-host"
+        }
+      ],
+      "headers": {
+        "Accept": "application/json"
+      },
+      "method": "GET",
+      "name": "example-get",
+      "url": "{{BASE_URL}}/get"
+    },
+    {
+      "body": null,
+      "capture": {},
+      "evaluations": [
+        {
+          "config": {
+            "expected": 418
+          },
+          "kind": "status_eq",
+          "name": "teapot"
+        }
+      ],
+      "headers": {},
+      "method": "GET",
+      "name": "example-status-418",
+      "url": "{{BASE_URL}}/status/418"
+    }
+  ],
+  "version": 1
+}

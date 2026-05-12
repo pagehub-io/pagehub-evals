@@ -1,4 +1,4 @@
-"""Round-trip invariant: import(chess.json) -> export each collection ->
+"""Round-trip invariant: import(example.json) -> export each collection ->
 import -> export -> assert ``normalize_for_roundtrip(a) == normalize_for_roundtrip(b)``.
 
 Drives ``fixtures.engine`` against a real Postgres (the import transaction
@@ -13,7 +13,7 @@ from pathlib import Path
 from api.fixtures.schemas import normalize_for_roundtrip
 from api.tests._db import db_pool, operator_test_client  # noqa: F401
 
-CHESS_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "chess.json"
+EXAMPLE_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "example.json"
 
 
 def _collection_ids_by_name(client) -> dict[str, str]:
@@ -21,16 +21,17 @@ def _collection_ids_by_name(client) -> dict[str, str]:
     return {c["name"]: c["id"] for c in items}
 
 
-def test_chess_fixture_roundtrips(db_pool) -> None:  # noqa: F811
-    bundle = json.loads(CHESS_FIXTURE.read_text())
+def test_example_fixture_roundtrips(db_pool) -> None:  # noqa: F811
+    bundle = json.loads(EXAMPLE_FIXTURE.read_text())
+    coll_names = [c["name"] for c in bundle["collections"]]
     with operator_test_client(db_pool) as client:
         r = client.post("/v1/fixtures/import", json=bundle)
         assert r.status_code == 200, r.text
 
         by_name = _collection_ids_by_name(client)
-        assert {"chess-legality", "chess-playable-game"} <= set(by_name)
+        assert set(coll_names) <= set(by_name)
 
-        for coll_name in ("chess-legality", "chess-playable-game"):
+        for coll_name in coll_names:
             cid = by_name[coll_name]
             export_a = client.get(f"/v1/collections/{cid}/export")
             assert export_a.status_code == 200, export_a.text

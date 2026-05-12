@@ -47,7 +47,6 @@ _TABLES_TO_TRUNCATE = (
     "collections",
     "requests",
     "environments",
-    "chess_games",
     "runs",
     "harness_keys",
 )
@@ -111,8 +110,6 @@ def operator_test_client(database_url: str, *, actor_id: str = "test-operator"):
     without a pool (see loop-discipline note above).
 
     Yields the ``TestClient``. Clears ``app.dependency_overrides`` on exit.
-    Unauthenticated routes (the chess module) only consume the ``get_db``
-    override; the auth overrides are inert for them.
     """
     from fastapi.testclient import TestClient
 

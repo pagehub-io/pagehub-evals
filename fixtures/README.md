@@ -19,29 +19,29 @@ lives in the OpenAPI docs (`/docs`, `/redoc`) — `FixtureBundle`,
   "version": 1,                       // int, required, must equal 1
   "environments": [                   // optional; OMITTED/[] in exports
     {
-      "name": "chess-local",
-      "variables": { "CHESS_BASE_URL": "http://localhost:8002" },
+      "name": "example-env",
+      "variables": { "BASE_URL": "https://httpbin.org" },
       "secrets":   { }                 // KEYS ONLY — every value MUST be "" (non-empty → 422)
     }
   ],
   "requests": [                       // names unique within the bundle
     {
-      "name": "chess-legal-from-startpos",
-      "method": "POST",
-      "url": "{{CHESS_BASE_URL}}/v1/modules/chess/legal-moves",
-      "headers": { "Content-Type": "application/json" },
-      "body": { "fen": "..." },        // arbitrary JSON, or null
+      "name": "example-get",
+      "method": "GET",
+      "url": "{{BASE_URL}}/get",
+      "headers": { "Accept": "application/json" },
+      "body": null,                    // arbitrary JSON, or null
       "capture": { },                  // var_name -> JSONPath-lite ($-prefixed)
       "evaluations": [                 // INLINE under each request
-        { "name": "ok", "kind": "status_eq", "config": { "expected": 200 } }
+        { "name": "status-ok", "kind": "status_eq", "config": { "expected": 200 } }
       ]
     }
   ],
   "collections": [                    // names unique within the bundle
     {
-      "name": "chess-legality",
+      "name": "example-smoke",
       "description": "...",
-      "items": [ "chess-legal-from-startpos" ]   // ARRAY of request *names*; index == position
+      "items": [ "example-get" ]       // ARRAY of request *names*; index == position
     }
   ]
 }
@@ -101,20 +101,22 @@ with an empty placeholder for the operator to fill in via
 (always `[]`), so no secret material (or even a secret *key name*) ever
 lands in a git-tracked file.
 
-## `fixtures/chess.json`
+## `fixtures/example.json`
 
-The first consumer. It imports:
+A minimal, illustrative bundle — and the one the fixture round-trip test
+(`api/tests/test_fixtures_roundtrip.py`) and the platform fixtures
+eval-seed import. It carries:
 
-- env `chess-local` with `CHESS_BASE_URL` → the instance's own origin.
-  **Operators override `CHESS_BASE_URL`** for the environment they run the
-  collection against: `http://localhost:8002` for local dev, the public
-  Vercel URL on staging/prod. (The fixture pins a placeholder; the run
-  binds the env at run time.)
-- collection `chess-legality` — two requests POST known FENs to
-  `/v1/modules/chess/legal-moves`; evals assert `body_contains` a
-  known-legal UCI move and that the FEN is echoed.
-- collection `chess-playable-game` — opens a game with the server engine
-  playing Black (`seed: 0`), then walks a scripted 4-ply White line; each
-  step asserts the expected post-engine-reply `$.fen` and `$.status ==
-  "in_progress"`. The canonical seed + line are documented (and pinned by a
-  test) in `api/modules/chess/README.md`.
+- env `example-env` with `BASE_URL → https://httpbin.org` — operators
+  override `BASE_URL` for whatever target they actually point the
+  collection at.
+- two requests, `example-get` (`GET {{BASE_URL}}/get`, evals: status 200 +
+  `body_contains "httpbin"`) and `example-status-418` (`GET
+  {{BASE_URL}}/status/418`, eval: status 418).
+- collection `example-smoke` ordering those two.
+
+It is deliberately *not* a real conformance suite — eval **targets are
+always external** to this app (see `CLAUDE.md` § "Pure evals — no in-repo
+targets"). A future chess conformance suite, for example, will be a fixture
+whose `requests[]` point at a separately-deployed chess service via
+`{{BASE_URL}}`, not at anything hosted here.
