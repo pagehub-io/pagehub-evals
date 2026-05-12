@@ -1,15 +1,30 @@
 name: Deploy (pagehub-evals)
 
-# Tag-triggered deploys via the pagehub-infra reusable-workflow pattern:
-#   git tag staging-2026-05-10 && git push --tags  → staging
-#   git tag v0.1.0              && git push --tags  → production
+# pagehub-evals is a PUBLIC repo. GitHub does not let a public repo
+# `uses:` a reusable workflow that lives in a PRIVATE repo, so this
+# workflow CANNOT call pagehub-infra's deploy-app.yml / deploy-cloudflare.yml
+# directly — every such attempt fails at the workflow-validation stage
+# with zero jobs ("this run likely failed because of a workflow file
+# issue").
 #
-# Two reusable workflows do the work:
-#   * deploy-app.yml@v1          — Vercel API + per-env runtime config
-#                                  from deploy/<environment>.env
-#   * deploy-cloudflare.yml@v1   — Expo web build → Cloudflare Pages,
-#                                  branch `main` for v* tags / `staging`
-#                                  for staging-* tags.
+# The shared deploy logic for public app repos lives — inlined — in the
+# PRIVATE `pagehub-io/pagehub-deploy-public-repos` repo, which CAN read
+# the org infra secrets and CAN check out this public repo at a tag.
+#
+# This workflow's only job is to hand the deploy off to that repo:
+#
+#   * If a `DEPLOY_DISPATCH_TOKEN` secret is configured (a PAT / GitHub
+#     App token with at least `contents: write` on
+#     pagehub-deploy-public-repos), it fires a `repository_dispatch`
+#     (event_type `deploy-public-app`) and the deploy runs automatically.
+#
+#   * If that secret is NOT set, it prints the exact manual command and
+#     exits 0 — the Deploy workflow stays GREEN rather than red-on-every-
+#     tag, and the operator runs the one-liner shown in the run's notice.
+#
+# Tag conventions (unchanged):
+#   git tag staging-2026-05-12 && git push --tags  → staging
+#   git tag v0.1.0             && git push --tags  → production
 
 on:
   push:
@@ -17,30 +32,43 @@ on:
       - 'staging-*'
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
-  deploy-api:
-    uses: pagehub-io/pagehub-infra/.github/workflows/deploy-app.yml@v1
-    with:
-      app_name: pagehub-evals
-      environment: ${{ startsWith(github.ref_name, 'v') && 'production' || 'staging' }}
-    secrets: inherit
-
-  deploy-cloudflare:
-    needs: deploy-api
-    uses: pagehub-io/pagehub-infra/.github/workflows/deploy-cloudflare.yml@v1
-    with:
-      app_name: pagehub-evals
-      environment: ${{ startsWith(github.ref_name, 'v') && 'production' || 'staging' }}
-    secrets: inherit
-
-  health-check:
-    name: Health Check
-    needs: [deploy-api, deploy-cloudflare]
+  handoff:
+    name: Hand off to pagehub-deploy-public-repos
     runs-on: ubuntu-latest
     env:
-      API_URL: ${{ startsWith(github.ref_name, 'v') && 'https://pagehub-evals-production.vercel.app' || 'https://pagehub-evals-staging.vercel.app' }}
+      APP_REPO: ${{ github.repository }}
+      APP_NAME: pagehub-evals
+      DEPLOY_REF: ${{ github.ref_name }}
+      ENVIRONMENT: ${{ startsWith(github.ref_name, 'v') && 'production' || 'staging' }}
+      DISPATCH_TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
     steps:
-      - name: Verify API health
+      - name: Dispatch deploy (or print manual command)
         run: |
           set -euo pipefail
-          curl -fSL --max-time 30 "$API_URL/health" | jq .
+          MANUAL_CMD="gh workflow run deploy.yml -R pagehub-io/pagehub-deploy-public-repos -f app_repo=${APP_REPO} -f app_name=${APP_NAME} -f ref=${DEPLOY_REF} -f environment=${ENVIRONMENT}"
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::notice title=Manual deploy step required::No DEPLOY_DISPATCH_TOKEN secret on this repo — run: ${MANUAL_CMD}"
+            echo "pagehub-evals is public and cannot run the private deploy workflows itself."
+            echo "Add a DEPLOY_DISPATCH_TOKEN secret (PAT or GitHub App token with contents:write on pagehub-deploy-public-repos) to enable auto-deploy-on-tag."
+            echo "For now, run this once to ship ${DEPLOY_REF} to ${ENVIRONMENT}:"
+            echo "  ${MANUAL_CMD}"
+            exit 0
+          fi
+          echo "Dispatching deploy-public-app to pagehub-deploy-public-repos: ${APP_REPO} @ ${DEPLOY_REF} -> ${ENVIRONMENT}"
+          http_code=$(curl -sS -o /tmp/dispatch_resp -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/pagehub-io/pagehub-deploy-public-repos/dispatches" \
+            -d "{\"event_type\":\"deploy-public-app\",\"client_payload\":{\"app_repo\":\"${APP_REPO}\",\"app_name\":\"${APP_NAME}\",\"ref\":\"${DEPLOY_REF}\",\"environment\":\"${ENVIRONMENT}\"}}")
+          if [ "$http_code" != "204" ]; then
+            echo "::error::repository_dispatch failed (HTTP $http_code)"
+            cat /tmp/dispatch_resp || true
+            echo "Fallback — run manually: ${MANUAL_CMD}"
+            exit 1
+          fi
+          echo "Dispatched. Watch: https://github.com/pagehub-io/pagehub-deploy-public-repos/actions"
