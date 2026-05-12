@@ -1,7 +1,11 @@
 """Events writer — append-only audit trail.
 
-Every state-changing handler should call ``record_event`` after the
-state change is durably committed. Events are visible via
+Every state-changing handler should call ``record_event`` once the
+state change is durable — either after its transaction commits, or
+*inside* the handler's own transaction so the audit row commits (and
+rolls back) atomically with the change it records. The latter is the
+right choice when the event must never exist without the change, or
+vice versa (e.g. fixture import). Events are visible via
 ``GET /v1/events`` and have no mutation endpoint.
 """
 

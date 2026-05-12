@@ -9,6 +9,7 @@ response into the run-local substitution map for downstream requests.
 import json
 from uuid import UUID
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.dependencies import AuthContext, require_user
@@ -55,20 +56,26 @@ async def create_request(
     body: CreateRequestRequest,
     auth: AuthContext = Depends(require_user),
 ) -> RequestResponse:
-    row = await auth.db.fetchrow(
-        """
-        INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
-        RETURNING id, name, method, url, headers, body, capture, created_at, updated_at
-        """,
-        auth.actor_id,
-        body.name,
-        body.method,
-        body.url,
-        json.dumps(body.headers),
-        json.dumps(body.body) if body.body is not None else None,
-        json.dumps(body.capture),
-    )
+    try:
+        row = await auth.db.fetchrow(
+            """
+            INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+            RETURNING id, name, method, url, headers, body, capture, created_at, updated_at
+            """,
+            auth.actor_id,
+            body.name,
+            body.method,
+            body.url,
+            json.dumps(body.headers),
+            json.dumps(body.body) if body.body is not None else None,
+            json.dumps(body.capture),
+        )
+    except asyncpg.UniqueViolationError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A request named '{body.name}' already exists",
+        ) from e
     await record_event(
         auth.db,
         actor_kind=auth.actor_kind,

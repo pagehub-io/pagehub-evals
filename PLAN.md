@@ -1,631 +1,957 @@
 # PLAN
 
-> Build: pagehub-evals JTBD pivot — finish the `runs/` verdict-bearing engine. Read `SPEC.md` first.
+> Build: pagehub-evals — fixture import/export. Read `SPEC.md` first (Manager / Designer / Architect sections are the contract).
 
 ## Security
 
 ### Threat model
+- **Malicious / careless eval author** (can author fixtures, has an operator JWT): commits a fixture with a live secret value; crafts a fixture that creates 100k requests / a 5000-item collection; crafts a fixture whose request templates point outbound at an arbitrary host; tries to clobber another operator's resources via upsert-by-name.
+- **Operator A vs operator B** (both hold operator JWTs, different `actor_id`): A imports a bundle that upserts/overwrites B's named requests/collections/environments; A exports B's collection.
+- **Anonymous / unauthenticated internet caller**: hits the chess module (it's unauthenticated by SPEC decision); spams `POST /v1/modules/chess/games` to fill `chess_games`; feeds malformed FEN / UCI strings hoping for a 500 + stack trace; tries to enumerate `chess_games` rows.
+- **Harness key holder** (run-execution credential, not an operator): tries to call `POST /v1/fixtures/import` or `GET /v1/collections/{id}/export` — must get 403 (`require_user` only).
+- **Run engine as confused deputy**: a fixture's request templates point `{{CHESS_BASE_URL}}/...` at an attacker host and the engine fires them (SSRF). Same surface as `POST /v1/requests` today; fixtures don't widen it.
 
-Actors and capabilities specific to a verdict gate that fires outbound HTTP from a server-side worker against URLs supplied via the DB:
-
-- **Harness-key holder** (untrusted-ish; one per installation): can POST `/v1/runs` with a chosen `collection_id`/`environment_id`/`harness_claim`. CANNOT author `requests` rows (`api/requests/routes.py:48,77,93` are `require_user`), CANNOT see other actors' runs (`routes.py:137-138`). Threat surface: choosing which (operator-authored) collection runs, reading own-run `evidence`.
-- **Compromised operator JWT or admin** (trusted but key-loss is a real failure mode): can author arbitrary `requests.url`, `requests.headers`, `requests.body`. Anything an operator can do, a stolen operator token can do. SSRF risk is bounded by *what the operator was already allowed to do* — but a stolen token from a low-privilege operator should not become a metadata-endpoint read primitive against the platform's egress.
-- **Target server under test** (adversarial response): chooses response status, headers, and body. Can echo back substituted secret material (`Authorization: Bearer …`) in 4xx body, can return giant payloads, can return crafted headers that make their way into our `evidence` JSONB and back out via `GET /v1/runs/{id}`.
-- **Unauthenticated caller**: blocked at `require_auth` / `require_user` everywhere (`dependencies.py:112-129`). No path on runs accepts anonymous traffic.
-
-Top concrete threats:
-
-1. **SSRF via `requests.url`** — engine fires from the platform's egress network. Operator-authored URL → metadata IP, internal Supabase, sibling Vercel functions, etc. Outbound is mandatory (we are by design a black-box checker), so the mitigation is a deny-list, not an allow-list.
-2. **Secret leakage via `evidence`** — `load_substitution_map` decrypts secrets into a Python dict (`environments/routes.py:188-202`). Engine substitutes them into outbound url/headers/body, fires, then stores `response_body_excerpt` (up to 1000 chars) and `response_headers` verbatim. An adversarial target echoes `Bearer XYZ` back in a 4xx body or a `Set-Cookie`; the secret lands in `evidence` JSONB and is returned by `GET /v1/runs/{id}`.
-3. **Substituted secrets re-stored in `evidence.requests[*].url`/`headers`** — even with a benign target, the *outgoing* `Authorization: Bearer <decrypted>` header is currently echoed into evidence verbatim (`engine.py:174` then `engine.py:236-240` writes `response_headers`, but the outgoing headers are NOT currently captured into evidence — confirm; the larger risk is the response side echo and slice-3 may add request-side mirroring, so codify the rule now).
-4. **Substitution miss leaks template into target** — `{{API_KEY}}` left literal in a URL transmits the string `{{API_KEY}}` to a third-party host. Low severity (no real secret leaks) but a tell about our internals.
-5. **Cross-actor read scope** — harness key reading another harness's runs. Clamped at `routes.py:137-138`; eval seed must exercise the 403.
-6. **PATCH bypass / verdict re-write via raw asyncpg** — engine writes verdict via direct `UPDATE` (`engine.py:334-344`). Any future code path that issues `UPDATE runs SET verdict=…` re-introduces the bypass. Slice-2 invariant: engine.py is the SOLE writer of `verdict`, `status` (post-INSERT), `evidence`, `started_at`, `finished_at`. `harness_claim`, `created_by_*` are write-once at INSERT (`routes.py:64-83`); no UPDATE path touches them.
-7. **JWT slug confusion** — `app_slug` check at `dependencies.py:73-74` is the only thing keeping a `pagehub` or `app-prayers` JWT from being honored here. New code paths that decode JWTs must route through `_verify_jwt` + slug check. Engine does not issue or verify JWTs — leave it that way.
-8. **Header injection via substituted values** — `{{TOKEN}}` substituted into a header value containing `\r\n` could split the outbound request (CRLF injection). httpx generally rejects control chars in header values, but the engine should sanitize defensively before handing to `client.request(...)`.
-
-### Authn / Authz (per endpoint)
-
-| Endpoint | Dep | Operator | Harness key | Notes |
-|---|---|---|---|---|
-| `POST /v1/runs` | `require_auth` | 202 | 202 | Body is `CreateRunRequest`; **add `model_config = ConfigDict(extra="forbid")`** so `verdict`/`status`/`evidence`/`started_at`/`finished_at`/`created_by_*` in the body → 422 at parse time (already architect-mandated, codifying it as a security requirement). Allowed fields: `collection_id`, `environment_id`, `harness_id`, `harness_claim`. |
-| `GET /v1/runs` | `require_user` | 200 | **403** | Harness keys blocked by `require_user` (`dependencies.py:139-140`). Eval seed must assert harness key → 403 here. |
-| `GET /v1/runs/{id}` | `require_auth` | 200 (any run) | 200 (own runs) / **403** (others) | Clamp at `routes.py:137-138`. Mismatched key returns 403, not 404, so seeds can distinguish "not yours" from "doesn't exist" (designer treats 403==404 in UI; backend stays explicit). |
-| `PATCH /v1/runs/{id}` | `require_auth` | **403** | **403** | Unconditional. No body parsing; route exists to make immutability testable. Eval seed asserts BOTH auth kinds receive 403. |
-
-`require_auth` rejects "both headers present" with 422 (`dependencies.py:117-121`) — no actor ambiguity. Empty/revoked/unknown harness keys → 401 (`dependencies.py:94-108`).
+### Authn / Authz
+- `POST /v1/fixtures/import`: `require_user` (operator JWT, slug-matched to `pagehub-evals`) — same gate as `POST /v1/requests` / `POST /v1/collections` / `POST /v1/environments` (`api/requests/routes.py:55`, `api/collections/routes.py:53`, `api/environments/routes.py:57`). Harness keys and anonymous → 403 via `require_user` (`api/dependencies.py:132`). Imported rows get `owner_user_id = auth.actor_id`.
+- `GET /v1/collections/{id}/export`: `require_user`. **Matches the existing `GET /v1/collections/{id}` read pattern** (`api/collections/routes.py:94` — any operator can read any collection; there is no `owner_user_id` filter in the SELECT). I agree with the recommendation: keep export as broad as the existing collection read — tightening *one* read path while `GET /{id}`, `GET ""`, and `GET /{id}/items` stay broad would be inconsistent security theater (an operator who can `GET /{id}` already sees every request body/header/eval the export would dump). If the team ever wants per-owner collection isolation, that's a separate cross-cutting change to every collections read route, flagged here, not smuggled into export. 404 (not 403) when the collection id doesn't exist — no existence oracle distinction needed since all operators can read all collections anyway.
+- Chess module (`POST /v1/modules/chess/legal-moves`, `/games`, `/games/{id}/moves`): **intentionally unauthenticated** (Architect/SPEC decision — eval target, not a protected resource). Audited below.
 
 ### Data exposure
+- **Secrets never cross the fixture boundary in either direction.**
+  - *Import:* `FixtureEnvironment.secrets` is keys-only — every value MUST be `""`; a non-empty value is a hard 422 at *parse time* (`{"error":"secret_value_in_fixture","environment":...,"key":...}`), before any DB write. So a git-committed fixture physically cannot carry live credential material — the model rejects it. On import, per key: existing key → preserve the target environment's stored ciphertext untouched (a dict-merge over the loaded `secrets` JSONB, `decrypt` never invoked); new key → write `encrypt("")` as an unset placeholder. `decrypt` (`api/shared/secrets.py`) is never on the import code path.
+  - *Export:* `environments: []` always (Architect contract — "a collection has no canonical environment"). The export builder (`fixtures.engine.build_export`) MUST NOT read `environments.secrets` at all — not even to mask it. Verify in code review: the export SELECT touches `collections`, `collection_items`, `requests`, `evaluations` only; no join to `environments`. So an export never leaks even a masked secret or a secret *key name*. This is the airtight property.
+  - *Residual (expected, fine):* after import an operator can `PATCH /v1/environments/{id}` to fill in the real secret value. That's the intended hand-off; the fixture stays clean, the live value lives only in the DB (Fernet at rest). Not a finding.
+  - Request `body`/`headers` in a fixture may contain `{{SECRET}}` *placeholders* — those are variable references, not values; safe to export. (The run engine substitutes them per-run from the bound environment; they're never resolved on the export path.)
+- **Owner scoping on upsert** — `INSERT ... ON CONFLICT (owner_user_id, name) DO UPDATE` for environments/collections (existing constraints) and for `requests` (new `UNIQUE (owner_user_id, name)` per Architect). The conflict target includes `owner_user_id`, so operator A's import can only collide with — and therefore only update — A's own rows. B's `chess-legality` collection and A's `chess-legality` collection are distinct rows; A's import never touches B's. Confirmed: no cross-owner clobber via import. **Code-review check:** the `ON CONFLICT` arbiter must be the *named* `(owner_user_id, name)` constraint, not `(name)` alone, and the `WHERE`/`SET` clauses must not be writable to set `owner_user_id` from the fixture (volatile field — stripped, warned).
+- **Audit / event payloads** — `record_event` is called once on a successful import: `kind="fixtures.imported"`, `target_kind="fixtures"`, `target_id=NULL`, `payload={counts...}` (the four `{created,updated}` pairs, plus `len(warnings)` is fine). **Do NOT log the fixture body** — it can be large, and even though `secrets` are keys-only, a request `body` is arbitrary JSON an author might (wrongly) have stuffed a token into; log counts only. If a fixture grows a top-level `name`/label field later, log that string; for now there is none, so just counts. The `warnings[]` strings are returned to the caller (already in the response body) — they reference field paths and resource names, not values; safe.
+- **Chess game state is non-sensitive** — `chess_games` rows are `{id (uuid), engine_color, seed, fen, moves[], status, timestamps}`. A FEN is a board position; `moves` is a UCI list; `seed` is an int. Nothing here is a secret, an identifier of a person, or cross-referenceable to anything sensitive — there is no `owner_user_id` on the table by design. Enumeration risk: `game_id` is a v4 UUID (`gen_random_uuid()`), unguessable; even if guessed, the row leaks only game state, which is itself returned by the API anyway. No `LIST /games` endpoint exists (and none should — adding one would be a (mild) enumeration nicety with zero product value). Acceptable.
+- **Error messages** — chess endpoints on malformed FEN/UCI must return `422` with a short `detail` string ("invalid FEN", "unparseable UCI move"), never a 500 with a Python traceback. `python-chess` raises `ValueError` on bad input (`chess.Board(fen)`, `chess.Move.from_uci(...)`); the module engine must catch `ValueError` (and `IndexError` for some malformed UCI) and translate to a 422 — no bare exception bubbling. Same discipline on import: a bad eval `kind`/`config`, unresolved item, duplicate name, etc. → explicit 422, never a stack trace.
 
-- **`evidence.requests[*].response_body_excerpt`** — verbatim, truncated to 1000 chars (`engine.py:222-229`). Trade: operators are trusted, harnesses see only their own runs. Acceptable. **Mitigation:** see header masking below — if the target echoed a known secret in the body, mask it before persisting.
-- **`evidence.requests[*].response_headers`** — verbatim dict from `r.headers` (`engine.py:174`). An adversarial target can put any string into `Set-Cookie`, `WWW-Authenticate`, or a custom header — including a secret it learned from our outgoing request (e.g., the target's own DB error containing `Bearer XYZ`). **REQUIRED: header-value masking pass before storing in evidence.** Build a value-set from the run's substitution map's *secret* values (NOT variable values), and for every response header value, if any secret value appears as a substring, replace it with `***`. Same pass on `response_body_excerpt` (after truncation). Variables are intentionally not masked — they are non-sensitive by definition.
-- **Outgoing url/headers/body** — slice-2 does NOT mirror outgoing request meta into evidence (engine writes only `method`, `url` post-substitution, and `request_id`/`request_name` per `engine.py:231-244`). The substituted `url` CAN contain secrets if the operator authored `https://api.example.com/?token={{API_KEY}}`. **DECISION: mask secret-values out of the persisted `url` too**, using the same value-set scan. Operators authoring tokens in querystrings is bad practice but is not the engine's problem to refuse; redacting on persist is.
-- **`evidence.requests[*].captured`** (slice-2 add) — keys captured from response bodies (e.g., `AUTH_TOKEN: <jwt>`). Captured values often ARE secret (they came from a login response). **DECISION: keys-only enforced by SCHEMA TYPE** — `RunRequestResult.captured: list[str]` (reconciled from the initial `dict[str, str]` shape). Engine builds a local `captured_dict: dict[str, str]` for the in-process `subs` map (downstream requests still substitute real values), then writes `sorted(captured_dict.keys())` into the persisted form. No redaction pass over `captured` is needed — the type makes value-leakage structurally impossible. The designer spec already shows keys-only in the UI (`SPEC.md:232-233`).
-- **`harness_claim`** — stored verbatim up to 10 000 chars. Operators and the originating harness see it. Acceptable; agents are instructed to summarize, not paste transcripts.
-- **`actor_id` / `created_by_id`** — UUIDs of harness keys are not themselves secret; the secret is `X-Harness-Key` (hashed in DB via `hash_secret`, `dependencies.py:96`). Listing operators that created runs is fine.
-- **Logs** — `engine.py:256` logs `run not found`. Otherwise the engine does not log url/headers/body. **REQUIRED**: keep it that way. No `logger.info(rendered_url)`, no `logger.debug(headers)` without an explicit env gate. httpx itself logs at DEBUG to its own logger; ensure `httpx` logger is at WARNING+ in production (set in logging config, not in engine code).
+### Mitigations
+- **Secret leakage via committed fixtures** → keys-only `dict[str,str]` model with a non-empty-value-is-422 validator at parse time; export emits `environments: []` and never queries `environments`. (See Data exposure.)
+- **Cross-owner clobber via upsert** → `ON CONFLICT (owner_user_id, name)`; `owner_user_id` is set server-side from `auth.actor_id`, never from the fixture (volatile → stripped + warned).
+- **Harness key / anon escalation to import/export** → `require_user` on both routes; same gate as every other authoring route.
+- **SSRF via fixture-authored request templates** → no new surface. A fixture can author a request with any `url` — but so can `POST /v1/requests` today; the run engine's `is_blocked_host` deny-list (`api/runs/_ssrf.py`) is the chokepoint and it's unchanged. In staging/prod it blocks loopback/link-local/RFC1918 literal IPs and non-http(s) schemes; `CHESS_BASE_URL` in prod is `https://pagehub-evals-production.vercel.app` (a public host) so legitimate chess requests pass. DNS-rebinding window is a pre-existing slice-3 item, not introduced here. Confirmed: no widening; the import path does not need to (and must not) re-validate URLs differently from `POST /v1/requests` — reuse the `requests/schemas.py` constraints (`url` 1..2000, method regex) verbatim via the `FixtureRequest` model.
+- **Fixture-as-DoS (oversized bundle)** → **add a hard cap on the fixture bundle.** Starlette/FastAPI has no default request-body size limit; a 50MB JSON with 100k requests would be parsed into memory, validated, and pushed through one transaction holding one pooled connection (pool size 10) — a cheap way for one operator to stall the API and bloat the DB. **Concrete caps the builder implements (same numbers in the Reliability section — these are the canonical values):**
+  - `FixtureCollection.items` (and therefore any imported collection): **≤ 50** — exactly `api/runs/_constants.py:COLLECTION_ITEM_CAP` (the shared leaf constant; the runs route imports it too); **import the constant, don't re-literal it** so the two never drift. A fixture declaring a 5000-item collection is pointless (the run engine refuses to execute any collection with >50 items). Reject at parse time: 422 `{"error":"collection_too_large","collection":"<name>","items":N,"max":50}`.
+  - `FixtureBundle.requests`: **≤ 200** (a comfortable multiple of 50; defensive).
+  - `FixtureBundle.collections`: **≤ 50**.
+  - `FixtureBundle.environments`: **≤ 50**.
+  - `FixtureRequest.evaluations`: **≤ 20** per request.
+  - Raw request body: **≤ 1 MiB (1,048,576 bytes)** — enforced by a pure-ASGI middleware (`api/fixtures/_body_limit.py`, `FixtureBodyLimitMiddleware`) scoped to the `POST /v1/fixtures/import` path, *before* the body is parsed: it streams the request body off the wire chunk-by-chunk, counting bytes, and short-circuits with a self-describing `413` the moment the running total exceeds the cap. It does **not** trust the `Content-Length` header (a client can lie or omit it) — the stream-and-count is the actual guard and is strictly better. Starlette has no default body limit, so the middleware is the size guard; the post-parse Pydantic caps (`_MAX_REQUESTS` / `_MAX_COLLECTIONS` / `_MAX_ENVIRONMENTS` / `_MAX_EVALUATIONS_PER_REQUEST` / `_MAX_COLLECTION_ITEMS` on `FixtureBundle` / `FixtureRequest`) are a second line, not the byte cap.
 
-### SSRF mitigation
+  These are all parse-time / pre-parse rejections — no DB churn. Flag for the Architect: the SPEC's "very large fixture (hundreds of requests)" edge-case note explicitly *defers* a limit ("if this becomes a problem it's a follow-up") — I'm pushing back: an *unbounded* operator-triggered transaction is a real (if low-severity, since it needs an operator JWT) abuse vector and the cap is one Pydantic annotation each. At minimum align `items` to `COLLECTION_ITEM_CAP`. (Reliability concurs; Data should note the cap exists so its "chess.json is a handful" framing isn't read as "no limit".)
+- **Unbounded chess-game creation (disk fill)** → low risk (a `chess_games` row is tiny: a UUID, two short strings, a JSONB list, two timestamps — well under 1KB), and the endpoint is anonymous so a determined spammer *can* create rows freely. **Resolved (matches SPEC + Reliability + Data): no reaper and no `chess_games_created_at` index this slice** — the table is tiny and only ever read by PK, an unused index buys nothing now; the slice-N reaper ships `DELETE FROM chess_games WHERE created_at < now() - interval '1 day'` *and* the `created_at` index together. A per-IP rate limit on `POST /v1/modules/chess/games` is new infra and out of scope for this slice. So: accept the (low-severity, anonymous, capacity-only) risk explicitly with the slice-N reaper as the tracked follow-up. (No `LIST`/enumeration endpoint, so the rows are write-mostly garbage, not a data-exposure issue — purely a capacity one.)
+- **Parser-DoS on chess input** → none material. FEN strings and UCI moves are tiny (bounded by FastAPI's normal body handling once a byte cap is in place; even without one, a `{"fen": "..."}` body is small). `python-chess` is pure-Python, parses FEN/UCI in linear time on a fixed-size 64-square board — no regex backtracking, no recursion blow-up, no algorithmic complexity hole. The only requirement is catching `ValueError`/`IndexError` and returning 422 (above). The `seed` parameter: type it as `int` (Pydantic `int`, with a sane range bound, e.g. `Field(ge=0, le=2**63-1)` to match the `BIGINT` column) — **not `Any`** — and feed it to `random.Random`; an int seed has no injection or resource-exhaustion angle. (Also obeys the project rule: every request body is a fully-typed Pydantic model, no `Any`/`dict` params on the chess routes.)
+- **SQL injection** → all new DB writes go through asyncpg parameterized queries (`$N` placeholders, `json.dumps(...)` into `$N::jsonb`) exactly like `api/requests/routes.py:58` and `api/environments/routes.py:60`. **No string-interpolated SQL anywhere in `fixtures/engine.py` or `modules/chess/engine.py`.** The one place existing code builds SQL dynamically is `update_environment` (`api/environments/routes.py:128` — a field list driven by which optional body fields were set); the import engine should *not* need that pattern (it writes a fixed column set per resource). If a code-review reveals it does, the column names must come from a hard-coded allowlist, never from fixture keys.
+- **`requests` UNIQUE constraint + 409** → `POST /v1/requests` (`api/requests/routes.py:54`) gains `try/except asyncpg.UniqueViolationError → HTTPException(409)`. No real security impact: the conflict is owner-scoped, so a 409 can only ever fire on the caller's *own* duplicate name — the 409 body must not echo the *other* row's owner (it can't; there's only one owner involved) and should just say "a request named '<name>' already exists" (the name is the caller's own input). Idempotent DDL block in `api/shared/schema.sql` per the Architect; against a *dirty* DB with pre-existing duplicate names a dedupe pass is required first — noted, not a concern on this fresh scaffold.
+- **Chess game-state events** → **resolved: no events from the chess module at all** (SPEC §Integrations is explicit — "it does not emit events"; Reliability concurs; Data treats it as already-decided). The run that drives a `chess-playable-game` collection already emits `run.*` events covering the whole sequence; a `chess_game.created` row would be marginal triage value and a per-move event pure volume. I withdraw the earlier "one `chess_game.created`" suggestion — go with SPEC. (If anyone later wants a `created` event for "when did this game start, what seed", payload would be `{seed, engine_color}`, non-sensitive — but not this slice.) No event write means no new audit-payload exposure surface on the chess path.
 
-Pagehub-evals is intentionally a black-box checker — outbound to arbitrary public hosts is the product. But link-local / metadata / RFC1918 / loopback are not legitimate targets in staging or production. The twin-override pattern is the dev escape hatch (it points to `http://twins:8000/...` which IS RFC1918 in development).
-
-**Required helper, called from `_execute_request` before `client.request(...)`:**
-
-```python
-# api/runs/_ssrf.py  (new)
-def is_blocked_host(url: str, env: str) -> tuple[bool, str | None]:
-    """Return (blocked, reason). In development, never blocks (twin override)."""
-```
-
-- In `env in {"staging", "production"}`: resolve the URL's hostname (literal IPs and DNS names), block if the resolved address falls in any of:
-  - `127.0.0.0/8`, `169.254.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `0.0.0.0/8`
-  - `::1`, `fc00::/7`, `fe80::/10`, `::ffff:0:0/96` (IPv4-mapped IPv6, re-check the embedded v4)
-  - Also block schemes other than `http`/`https` (no `file://`, `gopher://`, etc.).
-- In `env == "development"`: allow everything. Matches the `env == "development"` gate the twin middleware already enforces (`shared/twin_middleware.py`); new envs are deny-by-default per platform rule.
-- On block: short-circuit `_execute_request` to return a result with `response_status=0`, `transport_error="blocked: SSRF guard rejected <reason>"`, no evaluations run. Run-level verdict aggregation produces `verdict="error"` per existing aggregation rule.
-
-**DNS-rebinding caveat (documented, NOT mitigated this slice):** the helper resolves the hostname once for the check, then httpx resolves it again at fire-time. A hostile DNS server could return public on the first lookup and 169.254.169.254 on the second. Mitigations (resolve-then-pin-IP, custom `httpx.AsyncHTTPTransport`) are slice-3. Document the gap in code.
-
-This is a guardrail, not a complete SSRF defense. Slice-3 can add a per-environment outbound allow-list.
-
-### Twin override pattern — not breached
-
-- Engine runs inside `BackgroundTasks` (dispatched at `routes.py:96`). It receives no inbound HTTP request and has no `Request` object. `_twin_overrides_var` (`shared/twin_middleware.py:24`) is a contextvar; FastAPI's BackgroundTask runs in the request's contextvar copy, so the engine *could* read it. **MUST NOT.** The engine does not (and will not) consult `get_twin_overrides()` — it imports from `api.shared.db`, `api.environments.substitution` (post-refactor), `api.shared.events`, `httpx`, and nothing else. If a future engineer wires twin-overrides into engine outbound calls, they are punching a hole through the staging/production strip (the contextvar IS populated in dev, but the engine being twin-aware would be a footgun: operator authors `requests.url=…`, expects deterministic outbound, twin redirects it elsewhere). **Documented in `api/runs/engine.py` module docstring: "engine does not consult X-Twin-* overrides; outbound URL is exactly what `requests.url` resolves to after `{{VAR}}` substitution."**
-
-### Secrets at rest and in flight
-
-- **At rest:** `environments.secrets` is Fernet-encrypted (`api/shared/secrets.py`'s `encrypt`/`decrypt`). DB stores ciphertext only. `_reveal_secret_map` decrypts in-process; never persisted post-decrypt.
-- **In transit (engine → target):** `httpx.AsyncClient()` with `certifi` defaults. **HARD RULE: no `verify=False` anywhere.** Reviewer rejects any PR that adds it. No custom CA bundles this slice.
-- **In memory:** decrypted secrets live in the `subs` dict for the duration of `execute_run`. Not logged, not pickled, not sent to Sentry (Sentry DSN config exists at `config.py:165` — confirm `before_send` strips request bodies, or set `send_default_pii=False`; slice-3 hardens further).
-- **Header injection sanitizer:** after substitution, validate every header *value* matches `^[\x20-\x7e]*$` (printable ASCII, no CR/LF/NUL). On violation, drop the header from the outbound request AND record `substitution_missed`-style entry (or a new `header_rejected` field). This is belt-and-suspenders; httpx will likely reject too, but failing early with a clear evidence entry is better than `httpx.LocalProtocolError`.
-
-### Mitigations summary (builder must implement)
-
-1. **`CreateRunRequest.model_config = ConfigDict(extra="forbid")`** in `api/runs/schemas.py`. Reject `verdict`, `status`, `evidence`, `created_by_*`, `started_at`, `finished_at`, etc. at 422.
-2. **`api/runs/_ssrf.py`**: `is_blocked_host(url, env) -> (bool, reason)` per spec above; call from `_execute_request` before `client.request(...)`. On block: synthesize a `transport_error` result, skip evaluations.
-3. **Header-value sanitizer**: reject non-printable / CR / LF in post-substitution header values; drop the header, record in evidence.
-4. **Secret-value redaction pass** on persisted `evidence.requests[*].url`, `response_headers` (values), `response_body_excerpt`: substring-replace any *secret* value (from `load_substitution_map`'s secrets-half) with `***`. Variables are NOT redacted. Implementation: pass the secret-value set into `_execute_request`, redact on the way into the result dict, before append.
-5. **`captured` keys-only in persisted evidence**: `RunRequestResult.captured: list[str]` — enforced by schema type, not redaction. Engine keeps a local `captured_dict: dict[str, str]` for the in-process `subs` map; only `sorted(captured_dict.keys())` is written into the result. No code path writes captured *values* to JSONB.
-6. **Engine MUST NOT log url/headers/body** at INFO. The `httpx` logger is forced to WARNING+ in production logging config.
-7. **`verdict`/`status` post-INSERT writers**: only `api/runs/engine.py`. Code review rejects any other module that issues `UPDATE runs SET verdict=…` or `SET status=…`.
-8. **Engine MUST NOT consult `get_twin_overrides()`**. Documented in engine module docstring; code review rejects the import.
-9. **No `verify=False` on `httpx.AsyncClient`.** Ever.
-
-### Open concerns (need user decision before build)
-
-- **`evidence.requests[*].captured` keys-only — DECIDED (reconciled).** Schema type is `list[str]`; no further open question.
-- **DNS rebinding** between SSRF check and fire is out of scope. Confirm acceptance — slice-3 fix is a pinned-IP `httpx.AsyncHTTPTransport`.
-- **`response_body_excerpt` redaction may break diagnostics** (operator can no longer see the actual `Bearer XYZ` the target reflected). Trade is correct — leakage > debuggability — but flag for awareness.
-- **No outbound rate limit** in slice-2. A harness key spamming `POST /v1/runs` against a collection of 50 requests can fire 50 outbound HTTP calls per spam. Acceptable for slice-2 (operators trust their own harnesses); slice-3 may add a per-harness-key QPS cap.
-- **No bound on response body size before excerpt truncation** — `r.json()` / `r.text` materializes the full body in memory. A 1 GB response OOMs the worker. Recommend setting `httpx` `limits=httpx.Limits(...)` and a max-bytes read via streaming + cap, slice-2 or slice-3. Flag for builder to decide whether to in-scope.
-
-### Security-focused test coverage (eval seeds)
-
-The `platform/evals/seeds/pagehub_evals_runs_*.py` PR (SPEC.md:98-103) MUST include:
-
-1. **PATCH 403 from operator JWT** → assert 403 on `PATCH /v1/runs/{id}`.
-2. **PATCH 403 from harness key** → same, with `X-Harness-Key`.
-3. **Harness-key cross-read** → key A creates run R; key B `GET /v1/runs/R` → 403.
-4. **Operator JWT with wrong `app_slug`** → 403 at `dependencies.py:73-74`. (May already exist in slice-1 auth seed; if so, reference it; if not, add.)
-5. **`CreateRunRequest` extra-field rejection** → POST with `{"verdict": "passed", …}` → 422.
-6. **SSRF deny-list** (staging-only assertion): create a `requests` row with `url=http://169.254.169.254/latest/meta-data/`, POST a run, poll to terminal → `verdict="error"`, `evidence.requests[0].transport_error` contains `"blocked"`. Eval is skipped in `env=development` (where the deny-list is off by design).
-7. **Header sanitizer** → environment variable containing `"abc\r\nX-Injected: yes"`, request with `Authorization: Bearer {{TOKEN}}`, run terminal evidence shows header was rejected/sanitized; no `X-Injected` reached the target (harness-side twin assertion per `CLAUDE.md` "Eval assertion" rule).
-8. **Secret-value redaction** → environment secret `API_KEY=supersecret`, target deliberately echoes it in response body; `evidence.requests[0].response_body_excerpt` contains `***` not `supersecret`.
-
-Items 1, 2, 3, 5 are non-negotiable. Items 6, 7, 8 enforce the slice-2 NEW security guarantees; if the builder ships without these seeds, the guarantees are claimed-not-checked.
-
-AGREE: yes
-
-SCORE: 3
+### Open concerns
+- **Bundle size cap (the one item that still needs Architect sign-off)** — SPEC's edge-case note *defers* a fixture size limit; the PLAN (Security + Reliability, same numbers) overrides that: `collections[].items` ≤ `COLLECTION_ITEM_CAP` (50, the shared leaf constant in `api/runs/_constants.py`), `requests[]` ≤ 200, `collections[]` ≤ 50, `environments[]` ≤ 50, `evaluations[]` per request ≤ 20, raw body ≤ 1 MiB. ~five Pydantic `max_length` annotations + a small pre-parse body-size middleware (`FixtureBodyLimitMiddleware`); it contradicts a SPEC sentence, so Architect to confirm. (Recommendation stands: ship the caps; Data should add a one-liner acknowledging the cap so its "chess.json is a handful" framing isn't read as "no limit".)
+- **Chess-game retention** — RESOLVED: no reaper and no `chess_games` `created_at` index this slice (table is tiny, PK-only access); the slice-N reaper ships `DELETE WHERE created_at < now() - interval '1 day'` *with* the index, together. Accepted, tracked follow-up. (Settled in favour of SPEC + Data; Security no longer leans "add the index now".)
+- **Chess events** — RESOLVED: no events from the chess module (SPEC §Integrations is explicit; Reliability + Data agree). The earlier "one `chess_game.created`" suggestion is withdrawn.
+- **Export auth breadth** — I'm matching the existing "any operator reads any collection" pattern for `GET /v1/collections/{id}/export`. If anyone on the trio actually wants per-owner collection isolation, say so now — it's a cross-cutting change to every collections read route, not an export-only tweak, and out of scope as currently specced.
 
 ## Reliability
 
 ### Failure modes
 
-- **Worker death mid-run.** `BackgroundTasks` is per-uvicorn-worker, non-durable (`api/runs/routes.py:96`). A restart between the `pending → running` UPDATE (`engine.py:260-263`) and the terminal UPDATE (`engine.py:334-344`) leaves the row at `status='running'` forever. SPEC defers the reaper to slice-3 (Architect: `SPEC.md:499`). User-facing patch lives in the Designer's 5-minute detail-screen poll cap (`SPEC.md:244-250`) which then shows a manual Retry. Documented gap, not built this slice.
-- **HTTP timeout per outbound request.** Hard 10s ceiling (`engine.py:171`). Sane; keep. Total run wall time is bounded ≈ 10s × N (no parallelism). To stop a single run from pinning a worker indefinitely, enforce a collection-size cap of **50 items** at `POST /v1/runs` time (see Reliability-critical items below) → ≈500s worst case per run.
-- **Pool starvation.** Pool is 10 conns, `command_timeout=30` (`api/shared/db.py:17-23`). Current engine holds ONE connection across all HTTP fires (`engine.py:250-353`) — direct violation of Architect rule 4 (`SPEC.md:494-498`). Required reshape: (a) acquire-1 → write `started_at`, `status='running'` with `WHERE id=$1 AND status='pending'` guard, batch-fetch all `(requests, evaluations)` rows for the collection, RELEASE; (b) fire HTTP with NO DB conn held; (c) acquire-2 → single terminal UPDATE + `run.completed` event, RELEASE. Two short acquires per run, never N+1, never held across `await client.request(...)`.
-- **Substitution miss.** `{{VAR}}` left literal when key absent (`engine.py:35-49`, policy at `SPEC.md:454`). A miss is **NEVER** a `transport_error` on its own — the request still fires with the literal token in url/headers/body. Misses propagate into eval observed-vs-expected through the (mis-substituted) outbound payload and the response it generates. Per-request `substitution_missed: list[str]` is populated by re-scanning the rendered payload with `re.findall(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}", ...)` (`SPEC.md:454`) and is what the UI consumes — no client-side regex.
-- **Capture overrides env vars.** Engine policy: a value captured from response N via JSONPath (`requests.capture`, `SPEC.md:455-459`) is written into the run-local `subs` map and TAKES PRECEDENCE over the same key from `load_substitution_map(...)` when substituting requests N+1…M. Last-write-wins within the dict. Documented so operators don't see "wrong env value" and assume a bug.
-- **httpx transient errors** (DNS NXDOMAIN, TCP RST, TLS handshake fail, ReadTimeout, ConnectError). One try, zero retries this slice. The except branch at `engine.py:183-184` captures `f"{type(e).__name__}: {e}"` into the per-request `transport_error` string. Slice-3 may add bounded retries; not now.
-- **Database connectivity transient failure during terminal UPDATE.** If acquire-2 fails or the UPDATE itself raises, the run row sticks at `status='running'`. Same recovery gap as worker-death; covered by the slice-3 reaper. Reliability does NOT add a try/except retry around the terminal UPDATE this slice — surfacing failure to logs/Sentry is more honest than masking it.
-- **Concurrent terminal UPDATEs** (double `BackgroundTasks` dispatch on the same `run_id`). The `WHERE status='running'` guard on the terminal UPDATE (`SPEC.md:498`) makes the second writer match 0 rows and silently no-op. First writer wins; verdict + evidence are written exactly once.
+- **Bad eval `kind`/`config` in request #37 of 50 → whole import rolls back.** The
+  Architect's design (`api/fixtures/engine.py` called inside one
+  `async with auth.db.transaction():` in `api/fixtures/routes.py`) delivers
+  all-or-nothing: a `422` raised after any row write happens *inside* the txn, the
+  `with` block exits via exception, asyncpg issues `ROLLBACK`, nothing is applied.
+  The 422 body must name the offending resource (`{"error":
+  "invalid_evaluation_config", "request": "<name>", "evaluation": "<name>", ...}`),
+  so the operator knows what to fix without diffing the DB. **Confirmed: single
+  transaction delivers this** — no "best-effort" path, no per-resource commits.
+  Subtlety the builder must honour: any validation that *can* be done at parse time
+  (`kind` against `EvaluationKind`, per-kind `config` shape, non-empty secret value,
+  duplicate names in the bundle, unsupported `version`) belongs in the Pydantic
+  `FixtureBundle` model — that fails the request *before* the txn opens, which is
+  strictly better (no DB churn, FastAPI's standard 422 envelope). Only validation
+  that needs DB state (resolving a collection item's request name against rows just
+  inserted) runs inside the txn.
+- **DB connection drop mid-import → asyncpg raises → txn aborts → 500.** Acceptable.
+  asyncpg surfaces `ConnectionDoesNotExistError` / `InterfaceError`; the txn never
+  commits; the route's unhandled-exception path returns 500. No partial state because
+  nothing was committed. Operator retries; the retry is safe (see Idempotency). The
+  route must NOT retry internally — the one risky window (socket dies *after* COMMIT
+  but before the response reaches the caller) would double-apply on a blind retry;
+  asyncpg makes that window tiny but non-zero, and an operator-driven re-POST is just
+  as safe and is observable.
+- **A huge fixture holding a long transaction open.** `api/shared/schema.py` applies
+  the DDL under `pg_advisory_xact_lock` on boot (`schema.py:22`), but *normal* writes
+  aren't serialized — a big import takes row locks on every `requests` /
+  `collections` / `environments` row it upserts and on the `evaluations` /
+  `collection_items` rows it delete-then-reinserts, held until the txn ends. Two
+  operators importing overlapping fixtures concurrently: the second blocks on the
+  first's row locks, then proceeds (last writer wins per the Architect's
+  `ON CONFLICT ... RETURNING (xmax = 0)`). Acceptable for an operator-only authoring
+  action at this scale (`chess.json` is a handful of rows; pool size 10). **But
+  recommend a sane cap on the bundle, aligned with the run engine's
+  `COLLECTION_ITEM_CAP = 50` (`api/runs/_constants.py`, imported by
+  `api/runs/routes.py`):** a fixture declaring a 5000-request collection is
+  *useless* — the run engine refuses to execute any collection with >50 items, so
+  the collection import just wrote can never run. Reject at parse time:
+  `len(collection.items) <= 50` per collection (422
+  `{"error": "collection_too_large", "collection": "<name>", "items": N, "max":
+  50}`), plus a defensive overall cap (≤ ~200 `requests[]`, ≤ ~50 `collections[]`,
+  ≤ ~20 `evaluations[]` per request — round numbers; the run engine is the real
+  bound). **Flag: the per-collection cap MUST track
+  `api/runs/_constants.py:COLLECTION_ITEM_CAP` — import the constant or it drifts.** Without the
+  cap a malformed fixture is a slow self-DoS, not a crash — low severity, cheap to
+  prevent. (Security section raises the same point; this is the reliability framing.)
+- **Chess `/legal-moves` with garbage FEN → 422, not 500.** `python-chess`
+  `chess.Board(fen)` raises `ValueError` on a malformed FEN; the route must catch it
+  and return 422, never let it propagate to a 500. Same for `/games` with a bad
+  `starting_fen`. Un-parseable UCI on `/moves` → 422; illegal-given-position UCI →
+  200 with `status: "illegal_move"` (per the contract — a body field, not a transport
+  error). The line between "422" and "200 illegal_move" is exactly "parses as UCI
+  notation" vs. "is a legal move on this board" — the builder must not conflate them
+  or the playable-game evals (`json_path_eq $.status`) break.
+- **`/moves` on an unknown `game_id` → 404.** A run that lost its `GAME_ID` capture
+  (engine bug, or the game row got reaped) sees a 404 mid-collection → the run engine
+  marks that step failed → `error`/`failed` verdict. Acceptable; the table is durable
+  (below) so this should never happen from a cold start. No reaper this slice, so a
+  reaped-out-from-under-a-run scenario can't occur either.
 
 ### Idempotency
 
-- **`POST /v1/runs` is NOT idempotent this slice.** No client `Idempotency-Key` header is accepted or honored. A double-POST produces two distinct run rows, two engine dispatches, two verdicts. Operators that care about dedup can correlate on `harness_id` + `harness_claim` + a recent time window; the engine will not. Documented constraint; revisit in slice-3 only if harnesses retry POST under failure (no evidence yet that they do).
-- **`execute_run(run_id)` IS idempotent under the status guards.** Calling it twice on the same row:
-  - If the run is still `pending`: first call wins the `pending → running` guarded UPDATE (engine must add `AND status='pending'` per Architect rule 2, `SPEC.md:495`); second call updates 0 rows and `return`s silently.
-  - If the run is already `running`: second call's `pending → running` UPDATE matches 0 rows; the engine must abort BEFORE firing any HTTP (currently it doesn't — `engine.py:260-263` is unguarded; fix it).
-  - If the run is already terminal: terminal UPDATE's `WHERE status='running'` matches 0 rows; no clobber.
-- **`harness_claim`, `verdict`, `status`, `evidence` are write-once / engine-only.** Enforced at the HTTP layer by blanket `PATCH /v1/runs/{id}` → 403 (`routes.py:145-154`) and at the engine layer by the guarded terminal UPDATE. Both layers tested.
+- **Re-importing the same fixture is a no-op-shaped operation.** `created: 0`
+  everywhere; `updated` reflects the rows re-touched by the upsert (or zero, if the
+  bundle is empty). **Confirmed contract per SPEC: there is NO `unchanged` bucket** —
+  an unchanged re-import reports every touched row under `updated` with `created: 0`,
+  and `created: 0` is *the* idempotency signal (SPEC §"Import semantics", flow #2,
+  and the Architect's Contracts section). This is deterministic: `created` is computed
+  from `xmax = 0` on the upsert's `RETURNING`, a hard fact about whether the row
+  pre-existed — no heuristic, no value-diff. The pytest and the platform seed both
+  assert `created == 0` on the second import.
+- **REPLACE semantics are idempotent.** For each request in the bundle:
+  `DELETE FROM evaluations WHERE request_id = $1` then bulk-`INSERT` the bundle's
+  list. For each collection: `DELETE FROM collection_items WHERE collection_id = $1`
+  then bulk-`INSERT` with `position` = array index `0..n-1`. Same input → same final
+  state, every time (the delete is unconditional, the insert is from a fixed list,
+  positions are deterministic). **The `evaluations.id` / `collection_items.id`
+  churning on every import is acceptable** — those ids are not referenced by any
+  stable surface (no FK points at them; `runs` reference `collection_id` /
+  `environment_id`, never `collection_items.id` or `evaluations.id`), and the
+  round-trip normalizer drops `id` / `request_id` / `collection_id` before any
+  comparison (Architect's `normalize_for_roundtrip` step 1). So byte-stability of
+  export survives the id churn. Confirmed.
+- **No run gets orphaned by a re-import.** `runs.collection_id` and
+  `runs.environment_id` are `ON DELETE SET NULL`, but **import never deletes a
+  collection or environment** — top-level resources are upsert-only (Architect:
+  "import never deletes a request or collection the bundle doesn't mention; only
+  *children of mentioned parents* get the replace treatment"). The collection row's
+  `id` is preserved across re-import (`ON CONFLICT (owner_user_id, name) DO UPDATE`
+  keeps the existing PK). Therefore a re-import never nulls a `runs` FK, never orphans
+  historical run evidence. Confirmed.
+- **Concurrent imports of the same fixture (CI + operator).** Per-row
+  `INSERT ... ON CONFLICT DO UPDATE`; last writer wins; both calls return internally
+  consistent counts (one may report `created`, the other `updated` for the same row).
+  The collection-items REPLACE is atomic per collection because it's inside the one
+  txn. No corruption, no partial-collection state.
+
+### The round-trip invariant as a reliability property
+
+- The acceptance property is `export → import → export` byte-identical modulo
+  ids/timestamps, enforced via the single source of truth
+  `normalize_for_roundtrip(bundle: dict) -> dict` in `api/fixtures/schemas.py`
+  (Architect's Contracts §"Canonical serialization"). What can break byte-stability,
+  and how each is pinned:
+  - **Dict key ordering.** FastAPI serializes a Pydantic model in *field declaration
+    order* — the export bundle's key order is fixed by how `FixtureBundle` /
+    `FixtureRequest` / `FixtureEvaluation` / `FixtureCollection` are declared
+    (Architect spells out the exact order: top level `version, environments, requests,
+    collections`; request `name, method, url, headers, body, capture, evaluations`;
+    evaluation `name, kind, config`; collection `name, description, items`).
+    **Confirmed `model_dump()` preserves declaration order.** The normalizer
+    additionally sorts `requests[]`/`collections[]` by `name` and per-request
+    `evaluations[]` by `name`, so even a hand-authored bundle in a different order
+    normalizes to the same thing. The *values* of `headers`/`body`/`config`/
+    `variables` are dicts compared order-insensitively in Python — but any test that
+    serializes them for a `body_eq`-style assertion MUST
+    `json.dumps(..., sort_keys=True)` (Architect step 3 says exactly this).
+  - **`None`-vs-absent fields.** **Pick one and make export and the normalizer
+    agree.** Recommendation: **always-emit** for the modeled optional fields
+    (`headers: {}`, `body: null`, `capture: {}`, `description: null`, `items: []`,
+    `evaluations: []`, `environments: []`) — i.e. do NOT set
+    `response_model_exclude_none=True` on the `/export` route. Rationale: the project
+    rule prefers `response_model_exclude_none=True` "where appropriate", but here it
+    is *not* appropriate — a re-import of an export must produce the same export, and
+    "omit when None" makes `body: null` disappear on export while a hand-authored
+    `body: null` is *present* on import, so the round-trip of a `null`-body request
+    isn't byte-stable unless the normalizer also strips Nones. Cleaner to always emit.
+    If the builder prefers `exclude_none`, the normalizer must then drop `None`-valued
+    and `[]`/`{}`-valued keys on *both* sides — pick always-emit, it's less code and
+    less subtle. **The builder must state which choice they took in the PR.**
+  - **JSONB round-tripping through Postgres.** asyncpg returns a `jsonb` column as a
+    Python value via `json.loads`; the existing code in `api/requests/routes.py:28-39`
+    and `:61-70` does `json.dumps` on the way in, `json.loads` on the way out — there
+    is no custom asyncpg JSONB codec registered, so it's the driver default. `{"a":
+    1}` survives as `{"a": 1}`; `1.5` as `1.5`. The one nuance: JSON has no int/float
+    distinction at the wire level, but Python's `json` module preserves `int` vs
+    `float` on a round trip (`json.loads(json.dumps(3))` is `int 3`, not `3.0`), so a
+    `body` like `{"fen": "...", "depth": 3}` stays integer-valued; floats are exact
+    for the values JSON represents exactly (all the values a chess fixture uses).
+    **Flag for the builder: keep `json.dumps` on insert and `json.loads` on read in
+    the fixtures engine — do NOT register an asyncpg `jsonb` type codec, and do NOT
+    pass a Python dict directly to a `$n::jsonb` parameter (asyncpg would str-cast it,
+    not JSON-encode it).** This is a known-stable path; the existing requests routes
+    already rely on exactly it.
+  - **`environments` asymmetry.** Export always emits `environments: []` (Architect
+    confirmed `[]`, not key-omitted); the normalizer drops `environments` entirely
+    from the comparison (step 2). So a hand-authored fixture with `environments` still
+    round-trips: import applies it, export drops it, normalizer ignores it.
+  - **`collection_items.position` / first-referenced request order.** Export emits
+    requests in first-referenced order and assigns positions densely from array index,
+    so the normalizer's sort steps are no-ops on export-produced bundles — a clean
+    round-trip needs only normalizer steps 1, 4, 5. Pinned by the Architect.
+- **Recommended test:** `api/tests/test_fixtures_roundtrip.py` — `import(chess.json)`
+  → `export(each of the two collections)` → `import` each → `export` each again →
+  `assert normalize_for_roundtrip(a) == normalize_for_roundtrip(b)`. Drives
+  `fixtures.engine` directly against a real test Postgres (no live server). This is
+  the regression guard; the platform seed is the eval.
+
+### Chess module reliability
+
+- **State in `chess_games` survives cold starts / uvicorn restarts.** An in-memory
+  dict would drop a game mid-`chess-playable-game` run on a serverless cold start or
+  `uvicorn --reload`, and the run engine would see a 404 halfway through → a flaky
+  `error` verdict. The Architect chose a table (`api/shared/schema.sql` new
+  `chess_games`); **confirmed — that's the right call and the only correct one.** The
+  row is small. **The Data section's `chess_games` DDL is the authoritative schema**;
+  this Reliability prose refers to those column names, it does not define a parallel
+  one. Concretely Data persists `id`, `engine_color`, `seed BIGINT`, `starting_fen`,
+  `fen`, `move_history` JSONB, `move_count INTEGER` (`== jsonb_array_length(move_history)`,
+  the ply index), `status`, `created_at`, `updated_at`. Where the prose below writes
+  `moves` read it as Data's `move_history`; where it writes `ply = len(moves)` read it
+  as Data's stored `move_count`. (The Security section's `moves[]` shorthand is the
+  same column — not a third schema. Builder: follow Data's DDL verbatim.)
+- **Concurrency on `/moves` — read-modify-write race.** Two `/moves` calls on the
+  same `game_id` racing: each reads the FEN (and `moves` history), applies the harness
+  move, computes the engine reply, writes the new FEN + appended `moves`. A lost
+  update could corrupt the game (one writer's move vanishes; worse, the engine RNG
+  derivation — keyed on ply count, see below — desyncs from the persisted board,
+  making the position un-reconstructable). **Recommend: `SELECT ... FOR UPDATE` on
+  the `chess_games` row inside a transaction for the whole read-modify-write in
+  `/moves` (the `/games` open path is a plain INSERT, no contention).** In practice a
+  single eval run drives one game strictly sequentially — the run engine fires
+  requests one at a time, never overlapping — and two runs would never share a
+  `game_id` (each `POST /games` mints a fresh UUID). So the race window is essentially
+  "someone manually curls the same game id twice fast" — but `FOR UPDATE` is one
+  clause, costs nothing on the uncontended path, and turns a silent corruption into a
+  serialized correct result. **Flag: do it.** (An optimistic version column also
+  works but is more code for no benefit here.)
+- **Engine determinism — the single most fragile thing in the build.** SPEC: the
+  engine's reply is a "uniformly random legal move", RNG seeded by the request-body
+  `seed` (default `0`), and the `chess-playable-game` collection's per-step `$.fen`
+  evals are only authorable if **the entire game line is deterministic given the seed
+  AND the harness's scripted moves**. The Architect's NIT flags the trap: a fresh
+  `random.Random(seed)` *per `/moves` call* picks the same index every call → the
+  engine repeats its first move forever. The fix the builder MUST implement: derive
+  the RNG from `(seed, ply_index)`, not `seed` alone. **Exactly what's persisted and
+  how the move is chosen** (column names per the Data section's authoritative DDL):
+  - `chess_games.seed` (BIGINT) — the constant from the `/games` request body.
+  - `chess_games.move_history` (JSONB array of UCI strings) — the full move history,
+    appended on every applied move (harness moves and engine moves both). Doubles as
+    run evidence and the defensive board-replay source.
+  - `chess_games.move_count` (INTEGER, `== jsonb_array_length(move_history)`, written in
+    the same `UPDATE`) — **this is the ply index** the RNG keys on; cannot drift from
+    `move_history` since both land in one statement.
+  - `chess_games.starting_fen` — the FEN the game opened from (startpos by default);
+    with `move_history` it makes the board fully re-derivable.
+  - `chess_games.fen` — the current position (denormalized for cheap reads;
+    re-derivable from `starting_fen` + `move_history` — the three MUST stay consistent,
+    which is why `/moves` writes `fen` + `move_history` + `move_count` together inside
+    the `FOR UPDATE` txn).
+  - **Move selection (engine's turn):** let `ply = move_count` *at the moment the
+    engine is about to move* (i.e. after the harness move was appended, so `move_count`
+    already counts it). Compute the
+    sorted list `legal = sorted(m.uci() for m in board.legal_moves)`. Pick
+    `legal[random.Random((seed, ply)).randrange(len(legal))]` — a *fresh* `Random`
+    seeded by the `(seed, ply)` tuple each time, so every engine reply draws from a
+    different stream. (Equivalently: one `random.Random(seed)` advanced `ply` times —
+    but the tuple-seed form is stateless and doesn't depend on replay order, which is
+    safer.) Document the *exact* derivation in the README so the fixture author can
+    reproduce the FENs by hand.
+  - `api/modules/chess/README.md` MUST document: the canonical `seed` (`0`), the
+    scripted harness move line (`e7e5`, ...), and the resulting expected FEN after
+    each step — the literal values that go into `chess.json`'s `json_path_eq $.fen`
+    evals, ideally with a `python-chess` one-liner comment that re-derives them so the
+    numbers aren't circular with the test. **Assign this doc to the builder; the chess
+    fixture's evals are unwritable without it, and a wrong derivation makes them
+    silently wrong (they'd pass against the buggy engine and fail the moment the
+    engine is "fixed").**
 
 ### Retries & backoff
 
-- **HTTP (outbound from engine):** 0 retries this slice. One attempt, 10s timeout, `transport_error` recorded on failure. The eval seed authoring on `platform` MUST NOT encode flake-prone assertions against unstable upstreams — the gate's verdict is only as stable as the deployed system it points at. Documented as a hard constraint on the seed.
-- **Engine (execute_run itself):** 0 self-retries, 0 requeue. A crash mid-run leaves a stuck `running` row; recovery is the slice-3 reaper, not retry. This is intentional — silent retry of a partially-applied run that has already issued side-effecting POSTs against a deployed system would be worse than a stuck row.
-- **DB (asyncpg):** 0 application-level retries. `command_timeout=30` (`api/shared/db.py:21`) bounds each statement. Pool itself reconnects opportunistically; we don't second-guess it.
+- **Import: not retried internally.** A failed import (422 or 500) is returned to the
+  operator, who re-POSTs if appropriate. The upsert semantics make a manual retry a
+  no-op-shaped operation (see Idempotency), so this is safe — but an *automatic* retry
+  is deliberately not added (the COMMIT-then-socket-died window would double-apply;
+  operator re-POST is equally safe and observable).
+- **Chess `/moves`: not retried.** The run engine owns request-level retry policy
+  (unchanged by this slice); the chess module retries nothing. A `FOR UPDATE`
+  lock-wait is bounded by the other writer's txn (fast — one board apply), so no
+  backoff needed.
+- **What is NOT retried, on purpose:** import (manual re-POST instead), chess module
+  endpoints (stateless oracle / single board apply). Nothing in this slice introduces
+  a new retry loop.
 
 ### Observability
 
-- **Events** (audit trail via `record_event`, `api/shared/events.py`):
-  - `run.created` — emitted at `routes.py:84-95`. Actor = user or harness_key. Payload `{harness_id, collection_id}`. Keep.
-  - `run.started` — emitted at `engine.py:264-272`. Actor = system. Payload `{}`. Keep.
-  - `run.completed` — emitted at `engine.py:345-353`. Actor = system. **Extend payload** to `{verdict, status, request_count, duration_ms}`. `duration_ms` is `int((finished_at - started_at).total_seconds() * 1000)`; `request_count = len(evidence.requests)`. These two fields are the cheapest observability win this slice.
-  - **Not emitted:** per-failing-evaluation events. High cardinality, low value vs the JSONB `evidence` blob which already carries the same info structurally.
-- **Prometheus metrics** (project already has `/metrics` per `api/main.py:124-130`):
-  - `pagehub_evals_runs_total{verdict}` — counter, labels `passed|failed|error`. Increment in engine's terminal write path AFTER the UPDATE succeeds.
-  - `pagehub_evals_run_duration_seconds` — histogram, labelled by terminal verdict. Buckets: `0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600` (covers sub-second through the 500s implicit cap).
-  - `pagehub_evals_run_request_count` — histogram, no labels. Buckets: `0, 1, 2, 5, 10, 20, 50`.
-  - **Do NOT label by `harness_id`.** Cardinality blows up with every new harness key.
-- **Logging.**
-  - INFO: `run.started` and `run.completed` summary lines (`run_id`, `verdict`, `status`, `request_count`, `duration_ms`). NO request/response bodies, NO header values, NO env-var values (env may carry secrets per `load_substitution_map`).
-  - WARN: any request with non-empty `substitution_missed` (one line per run, list the missed keys de-duped). SSRF deny-list hit (covered in Security, surfaces here as a WARN).
-  - ERROR: terminal UPDATE failed (raises → caught at engine top-level wrapper); schema-apply failure at boot (already raises out of `lifespan` and aborts startup, `api/main.py:67-68`).
-  - DEBUG (off by default): per-request `method`, `host` (URL hostname only — NOT the full post-substitution URL, which can carry secrets in querystrings), `status`, `latency_ms`. No path/query, no headers, no bodies.
-- **Sentry** (`api/main.py:33-56`). Catch ONLY unexpected errors at the engine top-level — wrap the body of `execute_run` in try/except, capture-and-reraise via `sentry_sdk.capture_exception(...)` if available. Expected outcomes — per-request `transport_error`, eval mismatches, substitution misses, empty collection, `collection_id IS NULL` — are NOT Sentry-worthy and MUST NOT page on-call.
+- **Import logging.** Log at start: `fixture.import.start` with the resource counts
+  the bundle declares (`environments=N requests=N collections=N`, total evaluations).
+  On success: `fixture.import.ok` with the response counts (`{env: {created,updated},
+  ...}`). On failure: `fixture.import.failed` with the *which-resource* context — the
+  same `{"error": "...", "request": "...", "evaluation": "..."}` payload that goes in
+  the 422 detail — so an oncall reads the log line and knows exactly what the
+  operator's fixture got wrong without needing the request body. (On a 500: log the
+  exception with traceback as usual.) **Do not log the fixture body** (large; a
+  `body` field may contain a wrongly-pasted token) — counts and resource paths only;
+  Security section says the same.
+- **`record_event`.** Exactly one `events` row on success: `kind="fixtures.imported"`,
+  `target_kind="fixtures"`, `target_id=NULL`, `payload={counts...}` (Architect's
+  Integrations §`events.py`). No event on failure (the txn rolled back, including any
+  event write — and a failed import isn't a fact worth persisting; the log line covers
+  it).
+- **Metrics — recommend one counter, or skip; my call: add it, it's one line.**
+  `fixtures_imported_total` (no labels — import is rare and operator-only, so
+  cardinality and volume are both trivial), in a new `api/fixtures/_metrics.py`
+  mirroring `api/runs/_metrics.py`, incremented on success. Optionally
+  `labelnames=("outcome",)` with `outcome ∈ {ok, rejected}` if the oncall wants to
+  see a spike of bad fixtures — that's the only metric I'd consider; the per-resource
+  counts live in the `events` row, not Prometheus. **If the builder skips import
+  metrics entirely, that's defensible** (low-volume authoring action, `events` row is
+  the durable record) — but the existing repo pattern is "engine emits counters", so a
+  single `fixtures_imported_total` keeps it consistent. Pick one; don't ship a
+  half-dozen import gauges.
+- **Chess module: no metrics, no events.** Low value — it's the thing-under-test, and
+  the run that drives it already emits `run.*` events and `pagehub_evals_runs_*`
+  metrics. A `chess.*` event would be pure noise. Standard request/access logging is
+  enough to debug a 422-on-bad-FEN. (The Security section floats one
+  `chess_game.created` event; my reliability take: not needed, but if the trio wants
+  it, it's harmless and one row per game.)
+- **What an oncall sees when this misbehaves:** import wedged on a lock → a
+  `fixture.import.start` line with no matching `.ok`/`.failed`, plus a long-running
+  query in `pg_stat_activity` on `requests`/`collections` (the cap recommendation
+  prevents this from being unbounded). Bad fixture → `fixture.import.failed` with the
+  resource path. Chess game stuck → no symptom (rows tiny, abandoned harmlessly); a
+  run that hit a stuck game shows up as a `failed`/`error` run with the 404 step in
+  its evidence.
 
-### Recovery / on-call
+### Recovery
 
-- **Stuck-running run.** No remediation endpoint this slice. On-call procedure: (a) confirm uvicorn was restarted by checking `/health` `git_sha` vs the row's `started_at`; (b) issue manual `UPDATE runs SET status='error', verdict='error', finished_at=now() WHERE id=$1 AND status='running'` against the platform Supabase DB. Slice-3 ships the reaper plus a `GET /v1/runs?status=running&older_than=5m` filter; until then operator triage is direct DB. Document this in the runbook.
-- **Schema-apply failure at boot.** Existing lifespan behavior (`api/main.py:67-68`) raises out of `apply_schema()` and the app refuses to serve. `/health` then fails (process is down, not serving HTTP at all). Deploy gates on `/health` returning 200 — Vercel's deploy will not promote a broken build. No change needed this slice; just verify the `requests.capture` migration doesn't break the apply path.
-- **Migration safety.** The one schema delta this slice is:
-  ```sql
-  ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;
-  ```
-  Idempotent under the existing `apply_schema()` lifespan call. Safe to ship the migration BEFORE the engine code that reads it — existing rows backfill to `'{}'` and the column is a no-op for them. Rollout order: (1) migration deploys; (2) engine + routes deploy; (3) `RUNS_ENABLED=true` flips. Each step is independently rollback-safe.
-
-### Health checks
-
-- `/health` exists (`api/main.py:113-121`); reports `git_sha` and `env`. Do NOT add a runs-engine-specific health endpoint — there is no engine daemon in slice-2 to be healthy or unhealthy; `BackgroundTasks` is per-request.
-- "Engine is alive" signal in slice-3 is "saw a `run.completed` event in the last N minutes" — derived from the existing events table or the Prom counter above. Alerting on absence belongs to platform/eyes, not this repo.
-
-### Performance budgets
-
-- Per outbound HTTP request: 10s hard timeout (`engine.py:171`).
-- Per run wall time: ≤ 50 × 10s = **500s**, contingent on the 50-item collection cap below. Without the cap this is unbounded.
-- `GET /v1/runs/{id}`: target p95 < 50ms (single row, single JSONB blob, no joins). The detail screen polls at 2s while running (`SPEC.md:244-250`), so each operator session generates ≤30 reads/min — trivial.
-- 2s detail-poll × concurrent operators on the same run: at slice-2 scale (≤10 concurrent operators) this is ≤5 rps on the hot row, fine on the 10-conn pool.
-
-### Reliability-critical items for the builder
-
-Non-negotiable; reviewer will check each.
-
-1. **Engine batches reads up front.** ONE connection acquire that writes `pending → running` (guarded) AND fetches `(collection_items, requests, evaluations)` for the whole run. Release before the first HTTP fire. No DB conn held across `await client.request(...)`.
-2. **Two-acquire connection lifecycle.** Acquire-1 (pre-flight) + Acquire-2 (terminal UPDATE + final event). Nothing else. Replace current single-acquire pattern at `engine.py:250-353` end-to-end.
-3. **Guarded `pending → running` UPDATE.** Add `AND status='pending'` to the UPDATE at `engine.py:260-263`. If 0 rows updated, `return` immediately — someone else already dispatched. No HTTP fires, no terminal write, no event.
-4. **Guarded terminal UPDATE.** Add `AND status='running'` to the terminal UPDATE at `engine.py:334-344`. Already mandated by Architect; restated here so it's visible to reliability review.
-5. **Collection-size cap.** `POST /v1/runs` returns **422** if `collection_id` points to a collection with > 50 items. Check by `SELECT count(*) FROM collection_items WHERE collection_id=$1` inside the same handler before the INSERT. Detail message: `"collection exceeds max items=50 (got N)"`. Bounds engine wall-time; tested below.
-6. **10s timeout hard-coded.** No env-var override; no per-request override. Keep `engine.py:171` literal.
-7. **No request-body / header / env-var values in logs.** Names of missed substitution keys are fine (they are config, not secrets). Captured values, response bodies, request bodies, header values — never logged.
-8. **Engine top-level try/except.** `execute_run` wraps its full body so an unexpected exception (a) is sent to Sentry, (b) attempts a best-effort terminal UPDATE to `status='error', verdict='error', evidence={"requests": partial_results, "engine_error": str(exc)}`. If the best-effort UPDATE itself fails, log ERROR and let the slice-3 reaper handle it.
-9. **Drop the JSON deep-copy at `engine.py:227`.** Wasteful per Architect (`SPEC.md:382`); httpx returns fresh objects.
+- **A half-imported fixture cannot happen** — single transaction, all-or-nothing. A
+  422/500 leaves the DB exactly as it was; the operator fixes the fixture and
+  re-POSTs. No cleanup, no compensating action, no manual reconciliation. RTO ≈ time
+  to fix the JSON and re-POST.
+- **A `chess_games` row stuck in a weird state.** The game is simply abandoned —
+  nothing references it, the run that owned it is over (with a `failed` step in its
+  evidence). Rows are tiny (one FEN, a short move list). **No reaper this slice** —
+  recommend NOT building a TTL cleanup now; the Architect already notes a slice-N
+  `DELETE WHERE created_at < now() - interval '1 day'` as the eventual answer. (The
+  Security section leans toward at least adding a `created_at` index now so a future
+  reaper is cheap — I agree that index is fine to add this slice; the reaper itself is
+  slice-N.) Accretion is bounded (one row, a few hundred bytes, per `/games` call),
+  harmless. **Flag: deferred, deliberate punt — not a gap.**
+- **Schema migration on boot.** `api/shared/schema.py` applies `schema.sql`
+  idempotently under `pg_advisory_xact_lock` (`schema.py:22`). The two new pieces:
+  - `requests` `UNIQUE (owner_user_id, name)` — the Architect's
+    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname =
+    'requests_owner_user_id_name_key') THEN ALTER TABLE requests ADD CONSTRAINT ...
+    END IF; END $$;` block is re-runnable (the `IF NOT EXISTS` guard makes the second
+    boot a no-op). **Confirmed re-runnable.** Caveat the Architect already flagged:
+    against a *dirty* DB (pre-existing duplicate-named requests) the `ADD CONSTRAINT`
+    fails — not a concern here (fresh scaffold, `runs` is a stub, no real request
+    rows), but if this ever runs against a populated DB a dedupe pass is a
+    prerequisite. PLAN's Data section owns spelling that out; flagging the cross-ref.
+  - `CREATE TABLE IF NOT EXISTS chess_games (...)` — idempotent by construction.
+    **Confirmed fine.**
+  Recovery from a bad deploy: roll back the code; the schema additions are
+  forward-only and harmless (an unused unique constraint, an unused table) — no schema
+  rollback needed.
 
 ### Test coverage
 
-- **Unit tests** (`api/tests/test_runs_engine.py` — new):
-  - `test_substitute_leaves_missing_keys_literal` — `_substitute("{{X}}", {})` returns `"{{X}}"`. Proves miss-policy.
-  - `test_substitute_capture_overrides_env_var` — given subs seeded `{"K":"env"}` then updated `{"K":"captured"}`, the next substitution returns `"captured"`. Proves capture-precedence invariant.
-  - `test_resolve_path_missing_returns_sentinel` — `$.a.b` on `{"a":{}}` returns `_MISSING`. Proves JSONPath-lite miss semantics.
-  - `test_verdict_aggregation_transport_error_dominates` — given two requests, one with `transport_error`, one with all-passed evals → run verdict = `"error"`. Proves Architect's aggregation rule (`SPEC.md:474`).
-  - `test_verdict_aggregation_no_evaluations_is_error` — collection with one request, zero evaluations attached → verdict = `"error"`. Proves "nothing was actually checked" branch.
-  - `test_verdict_aggregation_one_failing_eval_is_failed` — one request, one passing eval, one failing eval → verdict = `"failed"` (not `error`). Proves `failed` vs `error` distinction.
-  - `test_terminal_update_no_op_when_already_terminal` — invoke engine path against a row pre-set to `status='passed'`; assert UPDATE matches 0 rows and no second event emitted. Proves idempotency guard.
-  - `test_collection_size_cap_enforced_at_post` — `POST /v1/runs` with a collection of 51 items → 422 with detail `"collection exceeds max items=50 (got 51)"`. Proves the wall-time bound.
-- **Eval coverage** (`~/github/pagehub-io/platform/evals/seeds/pagehub_evals_runs.py` — new; copy the structure of the sibling `pagehub_evals_evaluations.py`):
-  - Spec markdown: `~/github/pagehub-io/platform/evals/specs/pagehub-evals/runs.md` — narrative for the reliability scenarios below + the SPEC's slice-2 success-criteria scenarios (PATCH-403, capture+substitute, failing-eval verdict).
-  - Seed request prefixes + captures + key assertions:
-    - `runs_create_basic` → `POST /v1/runs` with seeded collection+env, capture `RUN_ID = $.id`. Evals: status 202, `$.status == "pending"`, `$.verdict == null`.
-    - `runs_poll_to_terminal` → `GET /v1/runs/{{RUN_ID}}` loop (seed harness handles the polling per `_shared.py` pattern). Evals: terminal `$.status in {passed, failed, error}`, `$.evidence.requests` is a list.
-    - `runs_harness_claim_immutable` → re-GET after terminal, assert `$.harness_claim` byte-equal to the original POST body.
-    - `runs_patch_blocked_operator` → `PATCH /v1/runs/{{RUN_ID}}` as operator JWT, expect 403.
-    - `runs_patch_blocked_harness` → same as above, harness key, expect 403.
-    - `runs_oversize_collection_rejected` → seed a 51-item collection, POST against it, expect **422** + body contains `"max items=50"`. (Reliability-specific.)
-    - `runs_transport_error_is_error_verdict` → seed a collection whose request points at an unroutable host (e.g. `http://127.0.0.1:1` or a known-dead twin URL); poll to terminal, expect `$.verdict == "error"`, `$.evidence.requests[0].transport_error` non-null, `$.evidence.requests[0].response_status == 0`. (Reliability-specific.)
-    - `runs_substitution_miss_propagates` → seed a request whose body references `{{NOT_IN_ENV}}`; poll to terminal, expect `$.evidence.requests[0].substitution_missed` contains `"NOT_IN_ENV"` AND that this did NOT manifest as `transport_error`. (Reliability-specific.)
-    - `runs_slow_target_times_out_at_10s` → twin endpoint that sleeps 15s; poll to terminal, expect `$.evidence.requests[0].transport_error` references a timeout class, `$.verdict == "error"`, and total `(finished_at - started_at) < 12s`.
-- **Concurrency / fault injection** (`api/tests/test_runs_engine_concurrency.py` — new, runs against the `db` Compose service, not a mock):
-  - `test_double_dispatch_writes_terminal_once` — INSERT a run row directly, fire `execute_run(run_id)` twice via `asyncio.gather` against a real Postgres, assert exactly one `run.completed` event and one terminal row. Proves the `WHERE status='running'` guard.
-  - `test_schema_apply_is_idempotent` — call `apply_schema()` twice in succession against the same DB; second call must not raise. Proves migration safety for the `requests.capture` `ADD COLUMN IF NOT EXISTS` line.
-  - `test_pool_not_held_during_http_fire` — patch `_execute_request` to await a long sleep; assert during that sleep the pool's `get_size() - get_idle_size()` is 0 (engine holds no conn while HTTP is in flight). Proves the two-acquire rule structurally.
-- **Open coverage gaps** (explicit, not silently dropped):
-  - Worker-death mid-run is NOT covered by a test this slice. The path that produces a stuck row exists; the reaper that recovers from it does not. Slice-3 ships both the reaper and a test that asserts a row > 5min old in `running` gets swept to `error`.
-  - Pool-starvation under load (e.g., 11 concurrent runs against the 10-conn pool) is not load-tested this slice. The two-acquire lifecycle defends against it structurally; a dedicated load test waits until we have real concurrent harnesses.
-  - Sentry plumbing (engine top-level wrapper actually sends to Sentry) is not asserted in CI — Sentry isn't wired in `env=test`. Manual verification on staging only.
-
-AGREE: yes
-
-SCORE: 3
+- **Unit tests:**
+  - `api/tests/test_fixtures_import.py`:
+    - `test_import_happy_path` — POST a small inline bundle (and/or `fixtures/chess.json`)
+      into an empty DB; assert each kind's `{created, updated}` matches; assert rows
+      landed (`SELECT count(*)`). *Proves:* the import contract end to end.
+    - `test_reimport_is_idempotent` — import twice; assert second response has
+      `created == 0` for every kind, `updated` ≥ 0; row counts unchanged;
+      `collection_items` identical in content and order (ids may churn — allowed).
+      *Proves:* the SPEC idempotency success-criterion.
+    - `test_bad_eval_kind_rejected_422` — bundle with unknown `kind`; 422 with
+      `{"error": "invalid_evaluation_kind", "request": ..., "evaluation": ...,
+      "allowed": [...]}`; **nothing written** (row counts still zero). *Proves:*
+      rollback on bad child.
+    - `test_bad_eval_config_rejected_422` — `status_eq` without `expected`; 422
+      `invalid_evaluation_config` + request/evaluation context; nothing written.
+    - `test_non_empty_secret_value_rejected_422` — `secrets: {"K": "value"}`; 422
+      `secret_value_in_fixture` at parse time (no DB write — ideally the txn never
+      opens).
+    - `test_unresolved_request_name_in_collection_item_rejected_422` — a
+      `collections[].items` name not in `requests[]`; 422 `unresolved_request_ref`
+      with `collection`, `item_index`, `request`; nothing written.
+    - `test_duplicate_name_in_bundle_rejected_422` — two `requests[]` with the same
+      name; 422 `duplicate_name` *before* any DB write.
+    - `test_collection_too_large_rejected_422` — a `collections[].items` of length 51
+      (one over `COLLECTION_ITEM_CAP`); 422 `collection_too_large`. *Proves:* the cap
+      and that it tracks `api/runs/_constants.py:COLLECTION_ITEM_CAP`.
+    - `test_all_or_nothing_rollback` — a bundle whose request #1 is fine and request
+      #2 has a bad eval `config`; assert 422 AND request #1 did NOT land. *Proves:*
+      the headline rollback invariant.
+    - `test_owner_scoping` — operator A imports a bundle with collection `C`; operator
+      B imports a bundle also naming `C`; assert two distinct rows
+      (`UNIQUE (owner_user_id, name)`), each owned correctly, B's import doesn't touch
+      A's.
+    - `test_volatile_fields_stripped_with_warning` — a request object with a stray
+      `id`/`created_at`; 200, the field ignored, `warnings[]` has the "ignored
+      unexpected field" entry.
+    - `test_empty_bundle_is_noop` — `{"version": 1}`; 200, all counts zero, `warnings
+      == ["fixture contained no resources"]`.
+    - `test_unsupported_version_rejected_422` — `{"version": 2}`; 422
+      `unsupported_fixture_version`.
+    - `test_export_then_import_unrelated_owner` — export `chess-legality`, assert
+      `environments == []`, import into a fresh owner, assert it lands and the
+      collection's items resolve by name.
+    - `test_import_requires_operator` — harness-key / anonymous caller → 403.
+  - `api/tests/test_fixtures_roundtrip.py` — `import(chess.json)` → `export` each of
+    the two collections → `import` each → `export` each again → `assert
+    normalize_for_roundtrip(a) == normalize_for_roundtrip(b)`. The single durable
+    guard for the round-trip invariant. Also covers: empty-collection round-trip; a
+    request shared by both collections appears once in each export's `requests[]`.
+  - `api/tests/test_requests_routes.py` (extend existing) —
+    `test_create_request_duplicate_name_409` — `POST /v1/requests` twice with the same
+    name → second is 409 (the new `try/except asyncpg.UniqueViolationError` wrapper the
+    new constraint makes reachable). This is a contract-surface change on a public
+    route — it ships with this test.
+  - `api/tests/test_chess_legal_moves.py`:
+    - `test_legal_moves_startpos` — startpos FEN → 200, `turn == "white"`,
+      `legal_moves` contains `e2e4` and `g1f3`, length 20, list is sorted.
+    - `test_legal_moves_midgame` — a known mid-game FEN → 200, `legal_moves` matches
+      `python-chess` ground truth, `turn` correct, `fen` echoed normalized.
+    - `test_malformed_fen_422` — `{"fen": "not a fen"}` → 422, not 500.
+    - `test_missing_fen_422` — body without `fen` → 422 (Pydantic).
+  - `api/tests/test_chess_games.py`:
+    - `test_open_game_engine_white_moves_first` — `POST /games {engine_color: "white",
+      seed: 0}` → 200, `engine_move` non-null, `turn == "black"`, `status ==
+      "in_progress"`, a `chess_games` row exists with `moves` length 1.
+    - `test_open_game_engine_black_no_move` — `engine_color: "black"` → `engine_move ==
+      null`, `turn == "white"`.
+    - `test_moves_legal_harness_move_then_engine_reply` — open (engine white, seed 0),
+      then `POST /games/{id}/moves {move: <a legal black move>}` → 200, `status ==
+      "in_progress"`, `engine_move` non-null, `moves` length 3, `fen` advanced.
+    - `test_moves_illegal_given_position_returns_200_illegal_move` — submit an illegal
+      UCI for the position → 200, `status == "illegal_move"`, `engine_move == null`,
+      board unchanged (`fen`/`moves` unchanged), `legal_moves` populated. **Not a
+      4xx.**
+    - `test_moves_unparseable_uci_422` — `move: "hello"` → 422.
+    - `test_moves_unknown_game_404` — random UUID → 404.
+    - `test_deterministic_game_given_seed` — open (engine white, seed 0), play the
+      *exact scripted harness line from the README*, assert the FEN after each step
+      equals the README's documented expected FEN. *Proves:* engine determinism — if
+      the `(seed, ply)` derivation is wrong, this fails. Also locks the README's
+      numbers so the fixture author can trust them.
+  - `api/tests/test_chess_games_concurrency.py` (recommended; mirrors
+    `api/tests/test_runs_engine_concurrency.py`): two concurrent `/moves` on the same
+    `game_id` against real Postgres; assert exactly one move "wins" each round, the
+    persisted `moves` is a coherent sequence, no lost update. *Proves:* the `FOR
+    UPDATE` invariant. If the builder defers this, flag it as an open gap (below) —
+    it's the only test that proves the lock does its job.
+  - **Which tests need the CI Postgres service:** all of `test_fixtures_import.py`,
+    `test_fixtures_roundtrip.py`, `test_create_request_duplicate_name_409`, the
+    `test_chess_games*` tests (state in a table), and the concurrency test — the
+    import engine's transaction logic and the `FOR UPDATE` semantics can't be
+    meaningfully faked with a `FakeConn`. CI already runs `postgres:17` for the
+    `backend-tests` job (`.github/workflows/ci.yml` — the `services.postgres` block;
+    `DATABASE_URL: postgresql://pagehub_evals:postgres@localhost:5533/...`), so this
+    is free — but the test files must actually connect to it (a real asyncpg pool
+    against `DATABASE_URL`, apply `schema.sql`, truncate between tests) the way
+    `test_runs_engine_concurrency.py` does. Pure parse-time validations
+    (`duplicate_name`, `secret_value_in_fixture`, `unsupported_version`, malformed
+    FEN, unparseable UCI) and the 403/404 route checks can use the existing
+    `FakeConn`-style route tests (`api/tests/test_runs_routes.py` pattern) since they
+    never reach the DB.
+- **Eval coverage** (separate repo `~/github/pagehub-io/platform`,
+  `http://localhost:4002` — confirmed up):
+  - **New seed `platform/evals/seeds/pagehub_evals_fixtures.py`** — model on
+    `seeds/pagehub_evals_collections.py` + the shared `seeds/_pagehub_evals.py`
+    helpers. Request templates + per-request `evaluations`:
+    - `fixtures-import-chess` — POST `fixtures/chess.json` (the literal file content)
+      to `/v1/fixtures/import` with the operator JWT. Capture `IMPORT1` (whole
+      response body). Evals: `status_eq 200`; `json_path_eq $.collections.created ==
+      2`; `json_path_eq $.requests.created` == the known count; `json_path_eq
+      $.environments.created == 1`.
+    - `fixtures-import-chess-again` — POST the same file again. Evals: `status_eq 200`;
+      `json_path_eq $.collections.created == 0`; `json_path_eq $.requests.created ==
+      0`; `json_path_eq $.environments.created == 0` — the SPEC idempotency
+      success-criterion.
+    - `fixtures-export-legality` — `GET /v1/collections/{{LEGALITY_ID}}/export`
+      (`LEGALITY_ID` captured from a `GET /v1/collections?name=chess-legality` step or
+      from the import response if it returns ids — adjust to the actual response
+      shape). Capture `EXPORT_A`. Evals: `status_eq 200`; `json_path_eq
+      $.environments` == `[]`; `json_path_eq $.collections[0].name == "chess-legality"`.
+    - `fixtures-reimport-export-a` — POST `{{EXPORT_A}}` back to `/v1/fixtures/import`.
+      Evals: `status_eq 200`; `json_path_eq $.collections.created == 0`.
+    - `fixtures-export-legality-b` — `GET .../export` again. Capture `EXPORT_B`. Evals:
+      `status_eq 200`. **The round-trip identity assertion:** ideally a `body_eq` (or
+      whatever the evals layer's equality vocabulary is) between `EXPORT_A` and
+      `EXPORT_B`. Since the evals layer can't run `normalize_for_roundtrip` itself,
+      the cleanest approach is to make export stable enough that raw `EXPORT_A ==
+      EXPORT_B` byte-for-byte (the Architect's analysis says it is — requests in
+      first-referenced order, positions dense, no Nones if always-emit), so a plain
+      `body_eq EXPORT_A EXPORT_B` works; if that proves flaky, fall back to
+      field-by-field assertions (`$.requests[0].name`, etc.). **This is the SPEC's
+      "checked-in eval asserting the export → import → export identity".**
+    - Spec markdown `~/github/pagehub-io/platform/evals/specs/pagehub-evals/fixtures-import-export.md`
+      — the user-story for the above (model on `specs/collections-crud.md`).
+  - **New seed `platform/evals/seeds/pagehub_evals_chess.py`** (or fold into the
+    fixtures seed — separate file is cleaner) — exercises the chess module endpoints
+    *directly* (unauthenticated, per the contract):
+    - `chess-legal-moves-startpos` — POST `/v1/modules/chess/legal-moves` with the
+      startpos FEN. Evals: `status_eq 200`; `body_contains "e2e4"`; `json_path_eq
+      $.turn == "white"`; `json_path_eq $.fen` == the normalized startpos FEN.
+    - `chess-legal-moves-bad-fen` — POST `{"fen": "garbage"}`. Evals: `status_eq 422`
+      — proves the 422-not-500 contract.
+    - `chess-open-game` — POST `/v1/modules/chess/games {engine_color: "white", seed:
+      0}`. Capture `GAME_ID` (`$.game_id`). Evals: `status_eq 200`; `json_path_eq
+      $.turn == "black"`; `json_path_eq $.status == "in_progress"`.
+    - `chess-move-1` — POST `/v1/modules/chess/games/{{GAME_ID}}/moves {move:
+      "e7e5"}`. Capture `FEN1`. Evals: `status_eq 200`; `json_path_eq $.status ==
+      "in_progress"`; `json_path_eq $.fen ==` the README's documented FEN after step 1.
+    - `chess-move-illegal` — POST a clearly-illegal-for-the-position UCI. Evals:
+      `status_eq 200`; `json_path_eq $.status == "illegal_move"` — the body-status
+      contract.
+    - `chess-move-unknown-game` — POST `/moves` to a random UUID. Evals: `status_eq
+      404`.
+    - Spec markdown `specs/pagehub-evals/chess-module.md`.
+    - Note: the `chess-legality` and `chess-playable-game` collections *themselves* get
+      exercised end-to-end as run collections in a follow-up (the JTBD pivot builds
+      `POST /v1/runs` against them); this slice's seeds hit the module HTTP surface
+      directly and prove the fixture imports/round-trips.
+  - **Status:** the two platform seeds + two spec markdowns are part of this slice's
+    *durable test surface* per the build skill — the builder **creates the files in the
+    platform repo and reports them**, but the platform-repo PR is a sibling PR; do NOT
+    block the pagehub-evals PR on its merge (Architect's Integrations note says exactly
+    this). The builder must (a) write the seeds, (b) confirm they run against a local
+    stack (`http://localhost:4002` is up), (c) report the sibling-PR branch in the
+    pagehub-evals PR description.
+- **Concurrency / fault injection:**
+  - `api/tests/test_fixtures_import.py::test_all_or_nothing_rollback` — proves the
+    single-transaction rollback invariant against real Postgres.
+  - `api/tests/test_chess_games_concurrency.py` — proves the `/moves` `SELECT FOR
+    UPDATE` invariant (no lost update under concurrent submits). Real Postgres against
+    the `db` Compose / CI service; cannot be mocked.
+  - Both follow the existing `api/tests/test_runs_engine_concurrency.py` shape.
+- **Open coverage gaps (flagged so they're not silently lost):**
+  - The chess engine's `(seed, ply)` determinism is only as good as the README's
+    documented line — `test_deterministic_game_given_seed` pins it, but if the builder
+    writes the README *after* the test, the two could be circular (test asserts what
+    the code does, README copies the test). The README's expected FENs must be
+    independently re-derivable (e.g. a comment showing the `python-chess` one-liner
+    that produces them) — flag in PR review.
+  - The `body_eq EXPORT_A EXPORT_B` round-trip eval assumes raw export bytes are
+    stable (no normalizer in the evals layer). If they're not (e.g. the builder ships
+    `response_model_exclude_none=True` after all, or dict ordering surprises us), the
+    eval is flaky — the *pytest* `test_fixtures_roundtrip.py` (which *does* run
+    `normalize_for_roundtrip`) is the real guard; the eval is a weaker mirror. The
+    builder should confirm raw-byte stability before relying on `body_eq` in the seed.
+  - No eval exercises the `chess-playable-game` *collection* as a run yet (needs `POST
+    /v1/runs`, the JTBD-pivot slice) — this slice's eval coverage is the module HTTP
+    surface + fixture import/export round-trip. Explicitly out of scope, not a gap in
+    *this* slice — flagged so the next slice picks it up.
 
 ## Data
 
+> Scope of DB changes this slice: (1) add `UNIQUE (owner_user_id, name)` to
+> `requests`; (2) new `chess_games` table; (3) no column changes to
+> `environments` / `collections` / `evaluations` / `collection_items` — the
+> importer works against existing shapes. All DDL goes in
+> `api/shared/schema.sql` and must be re-runnable every boot
+> (`api/shared/schema.py:23` executes the whole file under
+> `pg_advisory_xact_lock` each lifespan).
+
 ### Shapes
 
-#### Schema changes (idempotent SQL, applied via lifespan)
-
-One DDL line added to `api/shared/schema.sql`, placed immediately after the existing `body` column in the `requests` block (`schema.sql:32`):
+**`requests` — gains `UNIQUE (owner_user_id, name)`** (new). Today
+`api/shared/schema.sql:25-37` declares `requests` with **no** name uniqueness —
+multiple rows can share `(owner_user_id, name)`. Fixture upsert-by-name and
+`GET /v1/collections/{id}/export` (which resolves items back to a request *name*)
+both need the constraint. Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so add
+this `DO` block right after the existing `ALTER TABLE requests ADD COLUMN IF NOT
+EXISTS capture ...` line (`schema.sql:36`):
 
 ```sql
-ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Idempotent: re-runnable every boot. Postgres has no ADD CONSTRAINT IF NOT
+-- EXISTS, so guard on pg_constraint. Fixture import upserts requests by
+-- (owner_user_id, name); without this, ON CONFLICT has no arbiter.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'requests_owner_user_id_name_key'
+    ) THEN
+        ALTER TABLE requests
+            ADD CONSTRAINT requests_owner_user_id_name_key UNIQUE (owner_user_id, name);
+    END IF;
+END $$;
 ```
 
-- Placement: directly below the `CREATE TABLE requests (...)` block, between `schema.sql:35` and the existing `CREATE INDEX IF NOT EXISTS requests_owner_idx` at `schema.sql:36`. Keep the `CREATE TABLE` block as the historical baseline; the `ALTER ... ADD COLUMN IF NOT EXISTS` line lives below so the column materialises on first boot AND on every subsequent boot against pre-existing rows. Idempotent.
-- **No migrations folder.** `api/shared/schema.py:14-24` applies `schema.sql` end-to-end on every lifespan boot under advisory lock `0xE5_4A_15_00` inside a single transaction. The builder MUST express schema evolution as additional `ALTER ... IF NOT EXISTS` / `CREATE ... IF NOT EXISTS` statements appended to `schema.sql` — never as a `migrations/` directory, Alembic, or a separate runner. This is the contract.
-- `runs` (`schema.sql:97-111`): **no DDL changes.** All required columns exist — `harness_claim TEXT`, `verdict TEXT`, `status TEXT NOT NULL DEFAULT 'pending'`, `evidence JSONB NOT NULL DEFAULT '{}'::jsonb` (`schema.sql:107`), `created_by_kind`, `created_by_id`, `started_at`, `finished_at`. Evidence column type stays `JSONB NOT NULL DEFAULT '{}'::jsonb` — the engine writes `{"requests": [...]}` into it via `json.dumps(...)` cast `::jsonb`.
-- `evaluations`, `collection_items`, `collections`, `environments`, `harness_keys`, `events`: unchanged.
+The constraint name `requests_owner_user_id_name_key` deliberately matches what
+Postgres auto-generates for `UNIQUE (owner_user_id, name)`, so a hand-run
+`ALTER TABLE ... ADD UNIQUE` and this guarded block converge on the same name.
 
-#### Pydantic shape additions
+> **Migration risk, accepted (stated):** if a deployed DB already holds two
+> `requests` rows with the same `(owner_user_id, name)`, the `ALTER TABLE` raises
+> and the whole `schema.sql` apply (hence lifespan boot) fails. Per SPEC the
+> deployed DB is freshly scaffolded — slices 1-2 only added schema and a stub
+> `runs` resource; the platform never bulk-loaded `requests` — so there are no
+> duplicates to block it. Plain `ADD CONSTRAINT` (not `NOT VALID` + later
+> `VALIDATE`) is therefore fine. If this ever runs against a *dirty* DB, a dedupe
+> pass (`DELETE FROM requests a USING requests b WHERE a.ctid < b.ctid AND
+> a.owner_user_id = b.owner_user_id AND a.name = b.name` plus re-pointing
+> children) is required *before* the constraint can land — out of scope here,
+> noted for whoever hits it.
 
-`api/runs/schemas.py` — add three typed-evidence models and tighten `CreateRunRequest`:
+**`chess_games` — new table.** Game state must survive a serverless cold start /
+`uvicorn --reload` mid-run (the run engine would otherwise get a `404` halfway
+through `chess-playable-game` → `error` verdict, flaky eval), so it is *not*
+in-memory. Add after `collection_items` in `schema.sql`:
 
-```python
-class RunEvaluationResult(BaseModel):
-    id: UUID
-    name: str
-    kind: str
-    passed: bool
-    detail: dict[str, Any] = Field(default_factory=dict)
-    error: str | None = None
-
-class RunRequestResult(BaseModel):
-    request_id: UUID
-    request_name: str
-    method: str
-    url: str
-    response_status: int
-    response_headers: dict[str, str] = Field(default_factory=dict)
-    response_body_excerpt: Any = None
-    latency_ms: int
-    transport_error: str | None = None
-    substitution_missed: list[str] = Field(default_factory=list)
-    # KEYS ONLY. Captured *values* often carry live session tokens; the schema
-    # enforces "no values persisted" by TYPE (list, not dict). Engine builds a
-    # local `captured_dict: dict[str, str]` for the in-process subs map, then
-    # writes `sorted(captured_dict.keys())` here. See Security keys-only rule.
-    captured: list[str] = Field(default_factory=list)
-    evaluations: list[RunEvaluationResult] = Field(default_factory=list)
-    passed: bool
-
-class RunEvidence(BaseModel):
-    requests: list[RunRequestResult] = Field(default_factory=list)
+```sql
+-- Server-driven chess games for the in-repo chess module (api/modules/chess).
+-- Durable on purpose: a deploy landing mid-run must not drop the board.
+-- Unauthenticated / anonymous — no owner column; rows are ephemeral-ish and a
+-- slice-N reaper can prune by created_at (not this slice).
+CREATE TABLE IF NOT EXISTS chess_games (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    engine_color  TEXT NOT NULL,                       -- 'white' | 'black' (side the server engine plays)
+    seed          BIGINT NOT NULL,                     -- engine RNG seed, from the /games request body (default 0)
+    starting_fen  TEXT NOT NULL,                       -- FEN the game opened from (startpos by default) — for replay
+    fen           TEXT NOT NULL,                       -- current position
+    move_history  JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ordered UCI moves played (both sides); evidence + per-ply RNG replay
+    move_count    INTEGER NOT NULL DEFAULT 0,          -- == jsonb_array_length(move_history); the ply index
+    status        TEXT NOT NULL DEFAULT 'in_progress', -- in_progress | harness_won | harness_lost | draw
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
-- `RunResponse.evidence` (`api/runs/schemas.py:46`) changes from `dict[str, Any]` to `RunEvidence`.
-- `CreateRunRequest` (`api/runs/schemas.py:29`) gains `model_config = ConfigDict(extra="forbid")` — a client POST attempting to set `verdict` / `status` / `evidence` returns 422 at the HTTP boundary, not silent-drop. Schema-level enforcement of write-once that mirrors the route-level PATCH-403.
-- `_row_to_response` in `api/runs/routes.py:36-54` round-trips evidence through `RunEvidence.model_validate(...)` before constructing `RunResponse`. **Ordering is load-bearing: decode-to-dict-first, then fallback, then schema-validate.** (1) Read `evidence = row["evidence"]`; if asyncpg returned a JSON string (driver-version-dependent), `json.loads(evidence)` first. (2) Fallback: `evidence = evidence or {"requests": []}` so the INSERT-default `'{}'::jsonb` validates against the new typed shape rather than tripping `requests` as required. (3) `RunEvidence.model_validate(evidence)`. **No try/except** around `model_validate` — an engine-written row that fails validation is a real bug and must surface as 500, not silently empty the evidence.
-- Cross-section note (Security): the Security plan's keys-only rule (`PLAN.md:43,88`) is now enforced at the SCHEMA layer — `RunRequestResult.captured: list[str]`. No redaction pass needed over `captured`; the type makes "values persisted" structurally impossible. Engine builds a local `captured_dict: dict[str, str]` for the in-process subs map and writes only `sorted(captured_dict.keys())` into the persisted result.
+Column rationale:
+- `id UUID PK DEFAULT gen_random_uuid()` — `pgcrypto` is already enabled
+  (`schema.sql:7`); games are looked up **only** by id (the `{{GAME_ID}}` capture
+  threads it forward), so the PK is the sole access path.
+- `engine_color` / `seed` — captured from the `POST /v1/modules/chess/games`
+  request body (`engine_color`; `seed` default `0`, `SPEC.md:602`). `seed BIGINT`
+  so any 64-bit int the author pins fits (and matches the Security section's
+  `Field(ge=0, le=2**63-1)` on the request schema).
+- `starting_fen` **and** `move_history` **and** `move_count` together — this is
+  the fix for the Reliability/Architect flag (`SPEC.md:659`): a fresh
+  `random.Random(seed)` per move gives the **same** move every call, so the
+  engine's reply must be derived from `(seed, ply)` (e.g.
+  `random.Random((seed, move_count))` over the sorted legal-move list) **or** by
+  replaying `move_history` from `starting_fen` to re-advance one RNG. `move_count`
+  alone is enough for the `(seed, ply)` derivation (cheapest, per the brief's
+  recommendation); `move_history` is also stored because (a) it's evidence the
+  run can show and (b) it lets the module reconstruct the board defensively
+  rather than trusting only the denormalized `fen`. If the builder would rather
+  compute the ply from `len(move_history)` on read, `move_count` can be dropped
+  (it's the optional half) — recommendation: keep both, they're a few bytes and
+  `move_count` is written `= len(move_history)` in the same `UPDATE`, so they
+  cannot drift.
+- `status` stored values are exactly the **terminal-or-ongoing** set:
+  `in_progress` | `harness_won` | `harness_lost` | `draw`. Confirmed against the
+  chess HTTP contract (`SPEC.md:608-612`): `illegal_move` is a **response**
+  `status`, not a stored state — an illegal-given-the-position move is rejected,
+  the board is unchanged, **no `UPDATE` runs**, the row stays `in_progress`. So
+  `illegal_move` never appears in `chess_games.status`. No `CHECK` constraint on
+  `status` (keeping DDL minimal, matching the rest of this schema's style) — it's
+  an app invariant; a `CHECK (status IN (...))` could be added if drift is ever a
+  concern, not recommended for the scaffold.
+- `created_at` / `updated_at` — `updated_at` set by the module on each move (no
+  trigger; the module owns its writes, consistent with the rest of this DB).
+- **No `owner_user_id`** — the chess module is unauthenticated (`SPEC.md:615`);
+  games are anonymous. Nothing to scope, nothing to wipe per-user.
 
-`api/requests/schemas.py` — add `capture` to all three shapes:
+**Indexes on `chess_games`: PK only.** Lookups are by `id` (PK covers it). No
+`created_at` index this slice — SPEC says no reaper; add
+`CREATE INDEX IF NOT EXISTS chess_games_created_idx ON chess_games (created_at)`
+when/if a reaper lands. (Security section leans toward adding it now so a future
+reaper is cheap — fine either way; it's a one-liner. My recommendation: skip it
+this slice, the table is tiny and unscanned.)
 
-```python
-class CreateRequestRequest(BaseModel):
-    # ... existing fields ...
-    capture: dict[str, str] = Field(default_factory=dict)
+**FK posture for `chess_games`: clean.** It references nothing; nothing
+references it. No cascade considerations.
 
-    @field_validator("capture")
-    @classmethod
-    def _validate_capture(cls, v: dict[str, str]) -> dict[str, str]:
-        if len(v) > 32:
-            raise ValueError("at most 32 captures per request")
-        for k in v:
-            if len(k) > 64:
-                raise ValueError(f"capture key too long: {k!r}")
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
-                raise ValueError(f"capture key must match ^[A-Za-z_][A-Za-z0-9_]*$: {k!r}")
-        return v
+**No new columns on `environments` / `collections` / `evaluations` /
+`collection_items`.** Confirmed against `schema.sql`:
+- `environments` has `UNIQUE (owner_user_id, name)` (`schema.sql:19`) ✔ — the
+  upsert arbiter the importer needs.
+- `collections` has `UNIQUE (owner_user_id, name)` (`schema.sql:59`) ✔.
+- `collection_items` has `UNIQUE (collection_id, position)` (`schema.sql:68`) ✔
+  — the importer must therefore assign **dense** `position` `0..n-1` from the
+  fixture array order, **after deleting the collection's existing items** (a
+  partial overwrite could transiently collide on `position`). Note: the
+  bundle-size cap the Security and Reliability sections recommend
+  (`collections[].items` ≤ `api/runs/_constants.py:COLLECTION_ITEM_CAP` = 50, plus
+  defensive caps on `requests[]` / `evaluations[]` and an optional raw-byte cap)
+  is enforced **entirely at the Pydantic `FixtureBundle` model layer** — there is
+  **no DB-side `CHECK` on item count or row count and none is added**; the
+  importer always writes dense positions `0..n-1` regardless of `n`, and a
+  bundle that exceeds the cap is rejected `422` before the transaction opens, so
+  the DB never sees an over-cap collection. (Number-agnostic statement; the
+  Security/Reliability sections own the actual figure.)
+- `evaluations.request_id` is `REFERENCES requests(id) ON DELETE CASCADE`
+  (`schema.sql:42`) ✔ — but the importer **does not delete the request row** (it
+  `INSERT ... ON CONFLICT DO UPDATE`s it), so the cascade does **not** fire on
+  re-import; the importer must `DELETE FROM evaluations WHERE request_id = $1`
+  explicitly, then re-insert. Same logic for `collection_items` vs. `collections`.
 
-class UpdateRequestRequest(BaseModel):
-    # ... existing optional fields ...
-    capture: dict[str, str] | None = None
-
-class RequestResponse(BaseModel):
-    # ... existing fields ...
-    capture: dict[str, str] = Field(default_factory=dict)
-```
-
-- Key shape: `^[A-Za-z_][A-Za-z0-9_]*$`, max 64 chars, max 32 captures per request. Values are JSONPath-lite expressions (`$.id`, `$.a.b[0]`) — validated only at engine eval time, not at write time, because the engine's `_resolve_path` (`engine.py:60-98`) is the authoritative parser. A malformed path returns `_MISSING` at run time, surfaces as an empty `captured` map. No write-time path validation.
-- Seed-compatibility check: the slice-1 seed at `~/github/pagehub-io/platform/evals/seeds/pagehub_evals_evaluations.py:63` POSTs `capture={"PARENT_REQ_ID": "$.id"}` — passes every rule above. No regression.
-
-#### Engine JSONB write contract (`runs.evidence`)
-
-Engine builds typed `RunRequestResult`s, wraps as `RunEvidence`, dumps to JSON via `model_dump(mode="json")`, casts `::jsonb` in the terminal UPDATE. Worked example for a 2-request run with one capture chained across them:
-
-```json
-{
-  "requests": [
-    {
-      "request_id": "11111111-1111-1111-1111-111111111111",
-      "request_name": "create-thing",
-      "method": "POST",
-      "url": "https://api.example/things",
-      "response_status": 201,
-      "response_headers": {"content-type": "application/json"},
-      "response_body_excerpt": {"id": "abc"},
-      "latency_ms": 123,
-      "transport_error": null,
-      "substitution_missed": [],
-      "captured": ["THING_ID"],
-      "evaluations": [
-        {
-          "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-          "name": "created",
-          "kind": "status_eq",
-          "passed": true,
-          "detail": {"observed": 201, "expected": 201},
-          "error": null
-        }
-      ],
-      "passed": true
-    },
-    {
-      "request_id": "22222222-2222-2222-2222-222222222222",
-      "request_name": "fetch-thing",
-      "method": "GET",
-      "url": "https://api.example/things/abc",
-      "response_status": 200,
-      "response_headers": {"content-type": "application/json"},
-      "response_body_excerpt": {"id": "abc", "status": "ok"},
-      "latency_ms": 87,
-      "transport_error": null,
-      "substitution_missed": [],
-      "captured": [],
-      "evaluations": [
-        {
-          "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-          "name": "status",
-          "kind": "status_eq",
-          "passed": true,
-          "detail": {"observed": 200, "expected": 200},
-          "error": null
-        }
-      ],
-      "passed": true
-    }
-  ]
-}
-```
-
-Shape-drift vs. current WIP `engine.py:231-244`: today's engine writes a nested `response: {status_code, headers, body_excerpt}` sub-object. The typed contract flattens to `response_status` / `response_headers` / `response_body_excerpt` and adds `transport_error` (replacing the loose `error` key), `substitution_missed`, `captured`, `passed`. Engine refactor adopts the new shape; old rows are not migrated — the feature has been 503-flagged so no production rows exist.
-
-#### Redaction-pass ordering (mandatory, in this order)
-
-Validation runs AFTER redaction, not before. Builder MUST follow these four steps for each per-request result:
-
-(a) **Engine builds the raw result as a plain Python dict.** Post-substitution `url` (string), raw `response_headers: dict[str, str]` straight from `httpx`, raw `response_body_excerpt` (str | dict | list, already truncated to 1000 chars). No Pydantic yet.
-
-(b) **`_redact_secrets(secret_values_set, result_dict)` mutates in place.** The function walks `result_dict["url"]`, every value in `result_dict["response_headers"]`, and `result_dict["response_body_excerpt"]` (recursively if dict/list, substring-replace if str). For each occurrence of any value in `secret_values_set` (the *secrets* half of `load_substitution_map`, never variables), replace with `***`. Mutation, not copy — the dict passed in is the dict serialised at the end.
-
-(c) **Engine builds `captured: list[str]` from local `captured_dict.keys()`.** `captured_dict` lives only in the engine's run-local scope and feeds the next request's `subs` map; only the sorted keys are written into `result_dict["captured"]`. No redaction pass over `captured` — the schema's `list[str]` type makes value-leakage structurally impossible (see schema note above).
-
-(d) **`RunRequestResult.model_validate(result_dict)` then `RunEvidence.model_dump(mode="json")` for the `::jsonb` bind.** Validation is the LAST step. If redaction was skipped, validation will still pass (the schema doesn't know what a secret looks like); the contract is "redaction precedes validation precedes persist." Builder note: do not validate the result first and then try to redact a `RunRequestResult` instance — Pydantic-v2 models are not freely mutable and the ordering invites silent bugs.
+**There is no `PATCH /v1/requests/{id}` route today** — confirmed:
+`api/requests/routes.py` has only `POST ""` (`create_request`, line 53),
+`GET ""` (line 84), `GET "/{request_id}"` (line 99). The `UpdateRequestRequest`
+schema exists in `api/requests/schemas.py` but is unwired. So the new
+`UNIQUE (owner_user_id, name)` adds a 409 surface only on `POST /v1/requests`
+(see Integrity); nothing on PATCH because there is no PATCH.
 
 ### Migrations
 
+All "migrations" are idempotent statements appended to `api/shared/schema.sql`,
+re-applied every lifespan boot (`schema.py:23`). No separate migration runner.
+
 | Step | Forward | Rollback | Online-safe? |
 |---|---|---|---|
-| 1 | Append `ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;` to `api/shared/schema.sql` | `ALTER TABLE requests DROP COLUMN IF EXISTS capture;` (manual, not committed) | **Yes.** `ADD COLUMN ... DEFAULT '{}'::jsonb` with a constant default is metadata-only in Postgres 11+. No table rewrite, no row scan. Applied inside the lifespan transaction under advisory lock `0xE5_4A_15_00` so concurrent worker boots serialise. |
-| 2 | (Pydantic-only) `_row_to_response` in `api/runs/routes.py` round-trips evidence through `RunEvidence.model_validate(...)` | revert code | Yes — no DB change. |
-| 3 | (Pydantic-only) `CreateRunRequest` gains `extra="forbid"` | revert code | Yes — no DB change. |
-| 4 | (Optional) `CREATE INDEX IF NOT EXISTS runs_created_at_idx ON runs (created_at DESC);` appended to `schema.sql` | `DROP INDEX IF EXISTS runs_created_at_idx;` | Yes for slice-2 size. Index creation runs inside the schema transaction (NOT `CONCURRENTLY`) — briefly takes `ACCESS EXCLUSIVE` on `runs`. Fine while `runs` is small; if the table grows past ~100k rows before slice-3 lands, split into a separate non-transactional path. |
+| Add `requests_owner_user_id_name_key` UNIQUE | `DO $$ ... pg_constraint guard ... ALTER TABLE requests ADD CONSTRAINT ... UNIQUE (owner_user_id, name) ... $$;` (DDL above) | `ALTER TABLE requests DROP CONSTRAINT IF EXISTS requests_owner_user_id_name_key;` | Builds a unique index → brief `SHARE` lock on `requests`. Table is near-empty on the deployed scaffold → effectively instant. Aborts boot iff pre-existing duplicate names — not the case here. Not concurrent (`CREATE INDEX CONCURRENTLY` can't run inside the schema-apply transaction; not needed at this size). |
+| Create `chess_games` | `CREATE TABLE IF NOT EXISTS chess_games (...)` (DDL above) | `DROP TABLE IF EXISTS chess_games;` | Fully online — new table, no existing readers/writers, no data. |
+| (`requests.capture` add) | already present (`schema.sql:36`), unchanged | n/a | n/a |
 
-**No backfill needed.** `requests.capture` is `NOT NULL DEFAULT '{}'::jsonb` so existing rows pick up the default atomically at column-add. No data migration step.
+Both new statements are unconditionally safe to re-run: `CREATE TABLE IF NOT
+EXISTS` is a no-op the second time; the `DO` block's `pg_constraint` guard makes
+the `ALTER` a no-op once the constraint exists.
 
 ### Queries
 
-In execution order for one run lifecycle. Placeholders are asyncpg-style `$1, $2, ...`.
+Hot paths introduced this slice (resource CRUD is unchanged):
 
-1. **`POST /v1/runs`** — `api/runs/routes.py:64-83`, **unchanged**:
-   ```sql
-   INSERT INTO runs (
-       created_by_kind, created_by_id,
-       collection_id, environment_id,
-       harness_id, harness_claim,
-       status
-   ) VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-   RETURNING id, created_by_kind, created_by_id, collection_id, environment_id,
-             harness_id, harness_claim, status, verdict, evidence,
-             started_at, finished_at, created_at;
-   ```
-   Bindings: `auth.actor_kind, auth.actor_id, body.collection_id, body.environment_id, body.harness_id, body.harness_claim`.
-
-2. **Engine — mark running** (`engine.py:260-263`, **refactor** — add guard + RETURNING):
-   ```sql
-   UPDATE runs
-   SET status = 'running', started_at = now()
-   WHERE id = $1 AND status = 'pending'
-   RETURNING id;
-   ```
-   If 0 rows returned → engine aborts silently (re-fire defense, Architect Concurrency rule 2, `SPEC.md:495-496`). Connection released immediately after this UPDATE + event write; HTTP loop runs with no DB connection held.
-
-3. **Engine — load environment substitution map** — one call to `api.environments.substitution.load_substitution_map(conn, environment_id)` (new non-FastAPI module per `SPEC.md:390`). Existing SQL shape unchanged.
-
-4. **Engine — batched read of collection items + requests + evaluations.** Replaces the N+1 per-request fetches at `engine.py:282-311`. **Call: two queries**, not a single `json_agg` LEFT JOIN — simpler asyncpg row handling, equivalent perf at the slice's scale (handful of items, single-digit evals per request).
-
-   Query 4a — items + requests (single JOIN, ordered):
-   ```sql
-   SELECT
-       ci.position,
-       r.id           AS request_id,
-       r.name,
-       r.method,
-       r.url,
-       r.headers,
-       r.body,
-       r.capture
-   FROM collection_items ci
-   JOIN requests r ON r.id = ci.request_id
-   WHERE ci.collection_id = $1
-   ORDER BY ci.position ASC;
-   ```
-
-   Query 4b — all evaluations for those requests, fetched in one round-trip:
-   ```sql
-   SELECT id, request_id, name, kind, config
-   FROM evaluations
-   WHERE request_id = ANY($1::uuid[])
-   ORDER BY request_id, created_at ASC;
-   ```
-   Bindings for 4b: a `list[UUID]` of `request_id`s pulled from 4a's rows. Engine groups by `request_id` in Python before entering the HTTP loop. Connection released BEFORE the first `httpx` fire (Concurrency rule 4, `SPEC.md:497`).
-
-   **Why two queries over `json_agg`:** asyncpg returns `json_agg` as a JSON string requiring an extra `json.loads` per row, and the slice's scale doesn't justify the complexity. Two prepared statements, one round-trip each, total 2 round-trips per run regardless of item count. N+1 eliminated.
-
-5. **Engine — terminal UPDATE** (`engine.py:334-344`, **refactor**: add `WHERE status='running'` guard, swap to typed evidence dict):
-   ```sql
-   UPDATE runs
-   SET status = $1, verdict = $2, evidence = $3::jsonb, finished_at = now()
-   WHERE id = $4 AND status = 'running';
-   ```
-   Bindings: `status, verdict, json.dumps(evidence.model_dump(mode="json")), run_id`. The `WHERE status='running'` guard makes the terminal write a no-op against a row that's already terminal — protects against double-dispatch of `execute_run` on the same `run_id` (`SPEC.md:498`). If the UPDATE reports 0 rows affected, engine SKIPS the `run.completed` event so the audit log doesn't claim completion the row didn't accept.
-
-6. **`GET /v1/runs`** — `api/runs/routes.py:105-115`, **unchanged**. Ordered `created_at DESC`, `LIMIT 500`. 1 query per response, ≤500 rows. Each row's `evidence` JSONB is parsed once in `_row_to_response`.
-
-7. **`GET /v1/runs/{id}`** — `api/runs/routes.py:124-133`, **unchanged**. Single PK lookup. Hot path under Designer's 2s auto-poll (`SPEC.md:244-250`).
-
-8. **`PATCH /v1/runs/{id}`** — `api/runs/routes.py:145-154`. No DB query at all; raises 403 immediately after `_gate()`. Already correct.
-
-#### Request CRUD query updates (capture column)
-
-- `INSERT` (`api/requests/routes.py:50-62`): add `capture` to column list + a `$7::jsonb` bind; pass `json.dumps(body.capture)`.
-- `UPDATE` (when `UpdateRequestRequest` lands — currently not present in `api/requests/routes.py`): include `capture` in the partial-update set when `body.capture is not None`.
-- `SELECT` (list + detail): add `capture` to the returned columns; `_row_to_response` parses JSONB → dict (existing `headers`/`body` parsing pattern at `routes.py:24-32` is the template).
-
-#### Hot paths & latency targets
-
-| Path | Query | Target | Notes |
+| Hot path | Query | Index used | Notes |
 |---|---|---|---|
-| `GET /v1/runs/{id}` (auto-poll, 2s cadence) | PK lookup | <20ms | Single row, JSONB parse client-side. No new index needed (PK). |
-| `GET /v1/runs` | seq scan + sort | <200ms at 10k rows | `LIMIT 500` caps work. `runs_created_at_idx` (below) removes the sort step. |
-| Engine batched read (4a + 4b) | indexed JOIN + ANY-array | <50ms per run start | Both queries use existing indexes (`collection_items_collection_idx`, `evaluations_request_idx`). |
-| Engine terminal UPDATE | guarded PK update | <10ms | One row, one JSONB write. |
+| Import: upsert one request | `INSERT INTO requests (owner_user_id,name,method,url,headers,body,capture) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb) ON CONFLICT (owner_user_id,name) DO UPDATE SET method=EXCLUDED.method,url=EXCLUDED.url,headers=EXCLUDED.headers,body=EXCLUDED.body,capture=EXCLUDED.capture,updated_at=now() RETURNING id,(xmax = 0) AS inserted` | `requests_owner_user_id_name_key` (new unique index, as the ON CONFLICT arbiter) | One round trip per request; `chess.json` is a handful. |
+| Import: replace a request's evals | `DELETE FROM evaluations WHERE request_id=$1` then one multi-row `INSERT INTO evaluations (request_id,name,kind,config) VALUES ($1,$2,$3,$4::jsonb),...` | `evaluations_request_idx` (`schema.sql:49`) for the delete | Delete-all-then-bulk-insert per request. |
+| Import: upsert one collection | `INSERT INTO collections (owner_user_id,name,description) VALUES ($1,$2,$3) ON CONFLICT (owner_user_id,name) DO UPDATE SET description=EXCLUDED.description,updated_at=now() RETURNING id,(xmax = 0) AS inserted` | `collections_owner_user_id_name_key` (existing) | — |
+| Import: replace a collection's items | `DELETE FROM collection_items WHERE collection_id=$1` then `INSERT INTO collection_items (collection_id,request_id,position) VALUES ($1,$2,$3),...` | `collection_items_collection_idx` (`schema.sql:70`) | Positions dense `0..n-1` from fixture array order. |
+| Import: read existing env secrets (for merge) | `SELECT secrets FROM environments WHERE owner_user_id=$1 AND name=$2` | `environments_owner_user_id_name_key` (existing) | One read per env in the bundle, **before** the upsert (see Integrity §secrets). Row count = bundle env count; `chess.json` has zero envs, real bundles a handful — no batching needed. |
+| Import: upsert one environment | `INSERT INTO environments (owner_user_id,name,variables,secrets) VALUES ($1,$2,$3::jsonb,$4::jsonb) ON CONFLICT (owner_user_id,name) DO UPDATE SET variables=EXCLUDED.variables,secrets=EXCLUDED.secrets,updated_at=now() RETURNING id,(xmax = 0) AS inserted` | `environments_owner_user_id_name_key` (existing) | `$4` is the **merged** secrets dict computed in Python (see Integrity). |
+| Export a collection | (1) `SELECT id,name,description FROM collections WHERE id=$1` (2) `SELECT ci.position, r.* FROM collection_items ci JOIN requests r ON r.id=ci.request_id WHERE ci.collection_id=$1 ORDER BY ci.position` (3) `SELECT request_id,name,kind,config FROM evaluations WHERE request_id = ANY($1::uuid[]) ORDER BY request_id,created_at,name` | PK on `collections`; `collection_items_collection_idx` + PK on `requests` for the join; `evaluations_request_idx` for (3) | 3 queries total — **no N+1**; (3) is one batched query over the request-id array, not one-per-request. |
+| Chess: load a game | `SELECT id,engine_color,seed,starting_fen,fen,move_history,move_count,status FROM chess_games WHERE id=$1` | PK | Single-row PK lookup, sub-ms. |
+| Chess: create a game | `INSERT INTO chess_games (engine_color,seed,starting_fen,fen,move_history,move_count,status) VALUES (...) RETURNING id` | — | If `engine_color=="white"` the module computes the first move in the same request and the INSERT carries the post-move `fen`/`move_history`/`move_count=1`. |
+| Chess: apply a move | `SELECT ... FROM chess_games WHERE id=$1 FOR UPDATE` then `UPDATE chess_games SET fen=$2,move_history=$3::jsonb,move_count=$4,status=$5,updated_at=now() WHERE id=$1` | PK | Single-row update; run inside the request's txn so harness-move + engine-reply land atomically (Integrity §chess). |
 
-### Indexes
-
-Already present (`schema.sql:112-114`):
-
-- `runs_actor_idx` on `(created_by_kind, created_by_id)` — services the harness-self-read clamp at `routes.py:137-138`.
-- `runs_collection_idx` on `(collection_id)` — slice-3 filter; unused by slice-2 queries.
-- `runs_status_idx` on `(status)` — services the future stale-run reaper's `WHERE status='running'` scan.
-
-**New (recommended, cheap, future-proofs slice-3 pagination):**
-
-```sql
-CREATE INDEX IF NOT EXISTS runs_created_at_idx ON runs (created_at DESC);
-```
-
-- Rationale: `GET /v1/runs` does `ORDER BY created_at DESC LIMIT 500`. Below ~10k rows seq-scan + sort is fine; above that the sort dominates. Index is cheap to maintain on insert and removes the sort step from the list query — pure upside. Designer's slice-3 filter/pagination will lean on it directly.
-- Caveat noted in Migrations step 4: applied inside the lifespan transaction (not `CONCURRENTLY`), so it briefly takes `ACCESS EXCLUSIVE` on `runs`. Fine while `runs` is small; revisit if the table grows past ~100k rows before slice-3.
-
-No other new indexes needed:
-
-- `requests.capture` is read by request_id (PK) inside query 4a — no separate index required.
-- `evaluations.request_id` already indexed at `schema.sql:48`.
+The `ON CONFLICT DO UPDATE ... SET col=EXCLUDED.col` form writes every column
+unconditionally even when values are unchanged — intentional: declarative
+desired-state, and SPEC's `{created, updated}` response has no `unchanged` bucket
+(an `updated` row is one that *existed and was touched*, period). `(xmax = 0)` —
+see Integrity.
 
 ### Retention & PII
 
-**No retention this slice.** Documenting explicitly:
-
-- `runs` rows are **never pruned.** Verdict history is the audit substrate the JTBD relies on — pruning erases the very claims the operator went looking for. Slice-3 or later may add a retention policy (e.g., 90-day rollup for `passed` runs, indefinite for `failed`/`error`), but no policy ships this slice.
-- `evidence` JSONB can grow up to ~50KB per run (response body excerpts capped at 1000 chars × N requests). At expected slice-2 scale (hundreds of runs/day across all harnesses) this fits comfortably in Postgres without partitioning.
-- `harness_claim` (max 10 000 chars, `api/runs/schemas.py:33`) may contain agent-paste text. Not PII by source (agent output), but agents MAY include personal email addresses in claims. No special handling this slice — claims stored plaintext in `runs.harness_claim`.
-- `environments.secrets` is already Fernet-encrypted at rest (`schema.sql:16`); decryption is in-memory only via `load_substitution_map`. **Secrets MUST NOT leak into `evidence`** — the Security plan (`PLAN.md:41,87`) requires a value-set redaction pass on `url`, `response_headers`, `response_body_excerpt` before persist. Data layer trusts Security to perform that pass before serialising `RunRequestResult` to JSON.
-- `events` rows are append-only and never deleted (`schema.sql:116-127`). Same "no retention" posture.
+- **`chess_games`** — grows **unbounded** within a slice (one row per game ever
+  created; never deleted this slice). Row size ≈ 200–400 bytes (a FEN ~70 chars,
+  a short UCI move list, a handful of scalars). At eval-suite cadence
+  (`chess-playable-game` opens one game per run; CI runs the suite occasionally)
+  that's **dozens of rows per CI run** — trivial; even at 100k games it's tens of
+  MB. **No reaper this slice (SPEC).** When/if it matters:
+  `DELETE FROM chess_games WHERE created_at < now() - interval '7 days';` (cron or
+  a lifespan task) — and at that point add `chess_games_created_idx`. **No PII**
+  in `chess_games` — no owner, no IP, no harness id; just board state. Nothing to
+  anonymize. (Anonymous unbounded creation is a capacity concern, covered in the
+  Security section; not a data-correctness one.)
+- **Fixtures are not stored in the DB.** They're checked-in files
+  (`fixtures/*.json`) and, on import, fan out into the **existing** `environments`
+  / `requests` / `evaluations` / `collections` / `collection_items` rows — there
+  is **no `fixtures` table**, hence no fixture-retention or fixture-PII concern.
+- **Secret material never traverses the fixture boundary.** A fixture carries
+  secret *keys* with `""` values only (non-empty → 422 at parse time,
+  `SPEC.md:541`); on import the engine **preserves** the target environment's
+  existing Fernet ciphertext for a known key and writes `encrypt("")` for a new
+  key — `decrypt` is never called on the import path, and `GET .../export`
+  always emits `environments: []`, so no decrypted secret is ever written to a
+  git-tracked file or an export response. `environments.secrets` retention is
+  unchanged from today (Fernet ciphertext at rest, lives as long as the env row).
+- **`events`** — one append-only `fixtures.imported` row per successful import
+  (`actor_kind="user"`, `actor_id` = operator id, `target_kind="fixtures"`,
+  `target_id=NULL`, `payload` = the `{created, updated}` counts — **not** the
+  bundle contents). Same retention as the rest of `events` (append-only, no
+  reaper). Payload holds no secrets and no request bodies — just counts — so no
+  new PII surface. (Whether the chess module emits a `chess_game.created` event
+  is an open item in the Security section; if it does, the payload is
+  `{seed, engine_color}` — non-sensitive.)
 
 ### Integrity
 
-#### Write-once invariants (engine + route are the sole writers)
+| Invariant | Enforcement |
+|---|---|
+| A `(owner_user_id, name)` pair has at most one `requests` row | **DB constraint** `requests_owner_user_id_name_key` UNIQUE (new). Backstops the importer's `ON CONFLICT` arbiter and makes `POST /v1/requests` deterministic and `GET .../export`'s item→name resolution unambiguous. |
+| `POST /v1/requests` with a duplicate name → 409, not 500 | **App-level** on top of the DB constraint: wrap the `INSERT` in `create_request` (`api/requests/routes.py:58-71`) in `try/except asyncpg.UniqueViolationError → raise HTTPException(status_code=409, detail="A request named '<name>' already exists")`, mirroring `add_item` in `api/collections/routes.py:131-145`. Needs `import asyncpg` at the top of `requests/routes.py` (not currently imported there). Discrete change — list it in the build checklist. (Note: `POST /v1/collections`, `POST /v1/environments`, `PATCH /v1/environments/{id}` do **not** currently catch their `(owner_user_id, name)` violations — they 500; tightening those is out of scope, only `requests` is touched because this slice makes the violation reachable on `requests`.) |
+| Idempotent re-import: a second import of the same bundle creates nothing | **DB + app** — `ON CONFLICT (owner_user_id, name) DO UPDATE` on all three top-level resources means re-import only ever `UPDATE`s; `created` counts come from the `(xmax = 0)` flag (true ⇒ this row was `INSERT`ed, false ⇒ `UPDATE`d). On re-import every flag is false ⇒ `created: 0` per kind ⇒ the idempotency signal SPEC's success criteria key on. |
+| `created` vs `updated` counted without a prior SELECT | **App-level, via the `(xmax = 0)` Postgres idiom.** `INSERT ... ON CONFLICT DO UPDATE ... RETURNING id, (xmax = 0) AS inserted`: a freshly-inserted heap tuple has `xmax = 0`; an updated one inherits a non-zero `xmax` from the conflicting tuple it superseded. **Soundness caveat (stated):** `xmax` can be non-zero on a genuine insert if the row is locked/updated by a *concurrent* transaction within the same statement — vanishingly unlikely here (per-operator imports, tiny bundles, single-writer in practice), and the worst case is a miscount in the **response**, never wrong data. Acceptable; documented. |
+| Children (`evaluations`, `collection_items`) reflect the fixture exactly (declarative desired-state) | **App-level: delete-all-children-then-bulk-insert per parent**, inside the import transaction. `DELETE FROM evaluations WHERE request_id=$1` then re-insert the fixture's list; `DELETE FROM collection_items WHERE collection_id=$1` then re-insert. The parent row survives (it was upserted, not deleted), so `ON DELETE CASCADE` does **not** fire — the explicit `DELETE` is load-bearing, not redundant. Stale rows present in the DB but absent from the fixture are dropped (silently, per SPEC; the loud OpenAPI doc is the only surfacing). |
+| `collection_items.position` is dense `0..n-1` and matches fixture array order | **DB constraint** `UNIQUE (collection_id, position)` + **app** assigning `position = array_index` from the fixture **after** the per-collection `DELETE` (so no transient `position` collision). Export emits items in `ORDER BY position`, so the round-trip is stable. |
+| Every collection-item name resolves to a request in the **same** bundle | **App-level, in-memory** (bundle-only resolution, `SPEC.md:542`): the engine builds a `name → request_id` map **as it upserts the bundle's requests** (requests are processed before collections within the txn), then resolves each `items[]` name against that map; an unresolved name → 422 (`{"error":"unresolved_request_ref",...}`), rolling back. No fall-back to whatever request happens to be stored under that name (that would make import non-deterministic across instances — the drift this feature kills). |
+| FKs satisfied during import | **App-level write ordering**: within the single import transaction, process `environments` → `requests` (+ their `evaluations`) → `collections` (+ their `collection_items`). `collection_items.request_id` and `evaluations.request_id` therefore always reference rows already inserted/upserted earlier in the same txn. Because resolution is bundle-only, **every** request a collection item references is upserted before the `collection_items` insert. |
+| Whole import is all-or-nothing | **DB transaction**: the route wraps `engine.import_bundle` in one `async with auth.db.transaction():` (mirrors `api/runs/...` and the SPEC Architect section). One bad eval `kind` in a 50-request bundle rolls back **everything** — no partial state, no half-imported fixture. |
+| Secrets merge — fixture key with `""` value never clobbers stored ciphertext | **App-level read-then-merge** (NOT a blind JSONB overwrite): per env in the bundle, `SELECT secrets FROM environments WHERE owner_user_id=$1 AND name=$2`; in Python `merged = dict(stored)`, then for each fixture secret key `k` (value is `""`, parse-time enforced): if `k not in merged` set `merged[k] = encrypt("")` (new key → unset placeholder), else leave `merged[k]` (stored ciphertext) untouched; **stored keys the fixture doesn't mention are carried forward** (they're already in `merged` from the `dict(stored)` copy) — import never *deletes* a secret key, only adds/preserves (matches "top-level resources are upserted, not replaced"; the declarative-replace rule applies to *children*). Then `INSERT ... ON CONFLICT DO UPDATE SET variables=$3::jsonb, secrets=$4::jsonb, updated_at=now()` with `$4 = json.dumps(merged)`. A non-empty fixture secret value never reaches this code — it's a 422 at Pydantic parse time, before any DB read. This is the same algorithm the Security section describes ("import preserves stored ciphertext for known keys, writes `encrypt('')` for new keys, never calls `decrypt`") — read-then-merge-then-upsert is just the mechanical spelling of it. **Concurrency:** within a single import the whole sequence is one transaction, so the `SELECT` and the `ON CONFLICT` upsert see a consistent snapshot. Two imports running concurrently *for the same `owner_user_id` + env name* serialize on the conflicting-INSERT's row lock — the second blocks until the first commits, then its `DO UPDATE` runs against the post-first-commit row. Residual (minor, placeholder-only): the second import's `merged` dict was computed from a `SELECT` that ran *before* the first committed, so a brand-new secret *key* the first import added (value `encrypt("")`) that the second import's fixture doesn't mention could be dropped by the second's `SET secrets = $4`. In practice both concurrent imports are the *same* fixture (CI + an operator), so they declare the same key set and this can't bite; and the lost value is only ever an unset `encrypt("")` placeholder, never real credential material (real values only ever arrive via `PATCH /v1/environments/{id}`, which this path never touches). If the trio wants it airtight, push the merge into SQL — `SET secrets = EXCLUDED.secrets || environments.secrets` (existing keys' stored ciphertext wins; new keys take the `encrypt("")` placeholder from `EXCLUDED`) — which is atomic and needs no pre-`SELECT` at all; I'd take that simplification, but it's not required for correctness at this scale. |
+| Round-trip fidelity: `export → import → export` byte-identical (modulo timestamps/ids — in practice modulo nothing) | **App-level, by construction**: export emits requests in first-referenced order and assigns `collection_items.position` densely from array index, so the shared `normalize_for_roundtrip` (`api/fixtures/schemas.py`) sort/strip steps are no-ops on export-produced bundles. `requests.body` is arbitrary JSON stored as **JSONB** — JSONB does **not** preserve key order or insignificant whitespace and may re-render numbers / collapse duplicate keys, so the *first* export of a hand-authored fixture can differ from the source **file** (the body has been through JSONB once); but the *second* export equals the first (it's been through JSONB the same way), so `export → import → export` is stable even though `file → import → export` is not. SPEC's invariant is the former (`SPEC.md:22,30,180-191`) — **confirmed**; JSONB normalization is fine. **Builder flag:** author `fixtures/chess.json` with sorted keys / JSONB-canonical bodies so `import(chess.json) → export` is *also* diff-clean (otherwise a contributor diffing a fresh export against the committed file sees spurious churn) — or accept that only round-trips, not file-vs-export, are guaranteed and say so in `fixtures/README.md`. Recommendation: sorted keys in the committed fixture. Also confirmed: `id` / `created_at` / `updated_at` / `owner_user_id` / `request_id` / `collection_id` / `position` must **not appear in the Fixture Pydantic models at all** (`FixtureBundle` and friends), so they never leak into an export in the first place — `normalize_for_roundtrip` stripping them is a belt-and-braces guard against hand-authored input, not the primary mechanism. |
+| `chess_games`: a move applies atomically (harness move + engine reply + status, or nothing) | **DB transaction (per request)** + **app**: the `POST /v1/modules/chess/games/{id}/moves` handler does `SELECT ... FROM chess_games WHERE id=$1 FOR UPDATE` (or runs the whole handler in one txn), computes the new board / engine reply / status in Python, then a single `UPDATE chess_games SET fen=...,move_history=...,move_count=...,status=...,updated_at=now() WHERE id=$1`. Concurrent moves on the same `game_id` serialize on the row lock — last writer's view is consistent. (`chess.json`'s playable-game collection is a strictly sequential run anyway, so contention is theoretical, but the row lock makes it correct under it.) `move_count` is written `= len(move_history)` in the same statement — the denormalization cannot drift. |
+| `chess_games.status` only ever holds a stored state, never `illegal_move` | **App-level**: the module returns `status:"illegal_move"` in the **response body** for an illegal-given-position move and leaves the row untouched (no `UPDATE`) — `illegal_move` is never written to the column. (No DB `CHECK` on `status`, by choice; an app invariant.) |
+| `chess_games` has no orphan / no dangling reference | **N/A by design** — `chess_games` references nothing and nothing references it. Cleanest possible FK posture. |
 
-| Field | Writer | Mechanism |
+### Constraints relied on — summary
+
+| Constraint | Status | Used by |
 |---|---|---|
-| `runs.harness_claim` | `POST /v1/runs` INSERT only (`routes.py:67-83`) | No code path UPDATEs it. PATCH → 403 (`routes.py:145-154`). Eval-seed asserts byte-equality across creation and every subsequent GET. |
-| `runs.verdict` | Engine terminal UPDATE only (`engine.py:334-344`) | Guard `WHERE id=$1 AND status='running'` blocks double-write. INSERT defaults `verdict=NULL`. |
-| `runs.status` | INSERT writes `'pending'`; engine writes `'running'` (guarded `WHERE status='pending'`) then terminal value (guarded `WHERE status='running'`) | No PATCH path. Three guarded transitions exhaust the state machine. |
-| `runs.evidence` | Engine terminal UPDATE only | Validated client-side on read through `RunEvidence.model_validate`. Engine constructs from typed `RunRequestResult`s and serialises via `model_dump(mode="json")`. |
-| `runs.created_by_kind`, `runs.created_by_id` | INSERT only, from `AuthContext` | No UPDATE path. PATCH → 403. |
-| `runs.started_at`, `runs.finished_at` | Engine only (mark-running and terminal UPDATE respectively) | Never written together; never overwritten once set. |
-| `requests.capture` | `POST` + (future) `PATCH /v1/requests` (operator-only, `require_user`) | Pydantic `dict[str, str]` shape enforced at write; key regex + 64-char + 32-entry caps. |
-| Collection size at run dispatch | `POST /v1/runs` handler (route-level) | **No DB constraint.** Enforced in the route via `SELECT count(*) FROM collection_items WHERE collection_id=$1` before INSERT; > 50 → 422. The cap exists to bound engine wall-time (Reliability item 5) and is intentionally not a check constraint on `collection_items` — operators may author large collections for non-run uses; the cap only gates dispatch. |
+| `requests UNIQUE (owner_user_id, name)` (`requests_owner_user_id_name_key`) | **NEW** (idempotent `DO` block in `schema.sql`) | importer's `ON CONFLICT` arbiter; `POST /v1/requests` 409; unambiguous item-name → request resolution on export |
+| `environments UNIQUE (owner_user_id, name)` | existing (`schema.sql:19`) | importer env upsert |
+| `collections UNIQUE (owner_user_id, name)` | existing (`schema.sql:59`) | importer collection upsert |
+| `collection_items UNIQUE (collection_id, position)` | existing (`schema.sql:68`) | importer assigns dense `position 0..n-1` after per-collection delete |
+| `evaluations.request_id FK ON DELETE CASCADE` | existing (`schema.sql:42`) | present, but importer deletes evals **explicitly** by `request_id` (it upserts, never deletes, the parent request — cascade doesn't fire); same logic for `collection_items.collection_id` |
+| `chess_games` PK on `id` only | **NEW** | sole lookup path for a game |
 
-#### Referential consistency
+### Import write-sequence — exact pseudocode (one bundle, inside one txn)
 
-- `evaluations.request_id → requests(id) ON DELETE CASCADE` (`schema.sql:41`). Deleting a request wipes its evals.
-- `collection_items.request_id → requests(id) ON DELETE CASCADE` (`schema.sql:65`). Engine's batched read 4a silently skips deleted requests because they no longer satisfy the JOIN — same effective behaviour as today's `if req_row is None: continue` at `engine.py:301`.
-- `runs.collection_id` / `runs.environment_id → ON DELETE SET NULL` (`schema.sql:101-102`). A run whose collection or environment was deleted post-creation continues to live; `evidence` already records the substituted URL so the historical run is interpretable without the parent rows.
+```text
+# Route: async with auth.db.transaction():  →  engine.import_bundle(conn, owner_id, bundle)
+# (FixtureBundle already validated by Pydantic — bad version / bad eval kind|config /
+#  non-empty secret value / object-form collection item / duplicate-name-within-bundle
+#  already rejected as 422 before we get here.)
 
-#### Transaction boundaries
+counts = {k: {"created": 0, "updated": 0} for k in ("environments","requests","evaluations","collections")}
+warnings = []                      # volatile-field-stripped warnings collected at the Pydantic layer / here
+name_to_request_id = {}
 
-- **POST /v1/runs**: INSERT + `record_event` execute on the request-scoped connection from `get_db`. Both succeed or both fail when the request unwinds.
-- **Engine mark-running**: single UPDATE + single event INSERT, sequential on one short-lived connection. Both target idempotent writes.
-- **Engine terminal**: single UPDATE + single event INSERT, sequential on one short-lived connection. The terminal UPDATE is guarded (`WHERE status='running'`); if it reports 0 rows affected, the engine MUST skip the event write so the audit log doesn't claim completion the row didn't accept.
-- **Schema apply**: wrapped in one transaction under advisory lock `0xE5_4A_15_00` (`api/shared/schema.py:21-23`). Concurrent uvicorn workers serialise; partial-schema states impossible.
+# 1. ENVIRONMENTS  (read-then-merge for secrets)
+for env in bundle.environments:
+    stored = await conn.fetchval(
+        "SELECT secrets FROM environments WHERE owner_user_id = $1 AND name = $2", owner_id, env.name)
+    stored = json.loads(stored) if isinstance(stored, str) else (stored or {})
+    merged = dict(stored)                          # carry forward stored keys the fixture omits
+    for k in env.secrets:                          # every value is "" (parse-time enforced)
+        if k not in merged:
+            merged[k] = encrypt("")                # new key -> unset placeholder
+        # else: keep stored[k] ciphertext untouched
+    row = await conn.fetchrow(
+        """
+        INSERT INTO environments (owner_user_id, name, variables, secrets)
+        VALUES ($1, $2, $3::jsonb, $4::jsonb)
+        ON CONFLICT (owner_user_id, name) DO UPDATE
+          SET variables = EXCLUDED.variables, secrets = EXCLUDED.secrets, updated_at = now()
+        RETURNING id, (xmax = 0) AS inserted
+        """,
+        owner_id, env.name, json.dumps(env.variables), json.dumps(merged))
+    counts["environments"]["created" if row["inserted"] else "updated"] += 1
 
-#### Race-free invariants
+# 2. REQUESTS  (+ their evaluations, delete-all-then-reinsert)
+for req in bundle.requests:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+        ON CONFLICT (owner_user_id, name) DO UPDATE
+          SET method = EXCLUDED.method, url = EXCLUDED.url, headers = EXCLUDED.headers,
+              body = EXCLUDED.body, capture = EXCLUDED.capture, updated_at = now()
+        RETURNING id, (xmax = 0) AS inserted
+        """,
+        owner_id, req.name, req.method, req.url,
+        json.dumps(req.headers),
+        json.dumps(req.body) if req.body is not None else None,
+        json.dumps(req.capture))
+    rid = row["id"]
+    name_to_request_id[req.name] = rid
+    counts["requests"]["created" if row["inserted"] else "updated"] += 1
 
-- **Re-fire of `execute_run` on the same `run_id`**: protected by two guards — mark-running `WHERE status='pending'` (rule 2) AND terminal `WHERE status='running'` (rule 5). Second dispatch will either fail to mark-running (status already moved) → abort silently, or succeed at mark-running iff the first dispatch already finished and the row is somehow back to `pending` (impossible — engine never writes `pending`). Safe.
-- **Engine writing while a slice-3 stale-run reaper writes**: out of scope this slice. When the reaper lands, it MUST use `WHERE status='running' AND started_at < now() - interval '5 minutes'`, racing identically with the terminal UPDATE; whichever wins, the row goes terminal exactly once. Document the contract now so slice-3 doesn't re-derive it.
+    await conn.execute("DELETE FROM evaluations WHERE request_id = $1", rid)
+    for ev in req.evaluations:
+        await conn.execute(
+            "INSERT INTO evaluations (request_id, name, kind, config) VALUES ($1, $2, $3, $4::jsonb)",
+            rid, ev.name, ev.kind, json.dumps(ev.config))
+    # eval set counts under the PARENT request's bucket (SPEC: no per-eval created/updated)
+    counts["evaluations"]["created" if row["inserted"] else "updated"] += len(req.evaluations)
 
-#### Defensive read-side validation
+# 3. COLLECTIONS  (+ their items, delete-all-then-reinsert, bundle-only name resolution)
+for col in bundle.collections:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO collections (owner_user_id, name, description)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (owner_user_id, name) DO UPDATE
+          SET description = EXCLUDED.description, updated_at = now()
+        RETURNING id, (xmax = 0) AS inserted
+        """,
+        owner_id, col.name, col.description)
+    cid = row["id"]
+    counts["collections"]["created" if row["inserted"] else "updated"] += 1
 
-- `_row_to_response` (`api/runs/routes.py:36-54`): **decode-to-dict-first, then fallback, then schema-validate** — (1) `evidence = row["evidence"]`; if asyncpg returned a string, `json.loads` it; (2) `evidence = evidence or {"requests": []}` (covers the `'{}'::jsonb` INSERT default which would otherwise fail `RunEvidence` validation); (3) `RunEvidence.model_validate(evidence)`. **No try/except** around `model_validate` — an engine-written row that fails validation is a real engineering bug and must surface as 500, not silently empty the evidence.
-- Engine reads `requests.capture` as raw JSONB; if the value is None / malformed (legacy NULL despite `NOT NULL DEFAULT`, or some future migration breakage), treat as empty dict (defensive). Pydantic enforces `dict[str, str]` on the response side.
+    await conn.execute("DELETE FROM collection_items WHERE collection_id = $1", cid)
+    for position, item_name in enumerate(col.items):           # array index == position
+        rid = name_to_request_id.get(item_name)
+        if rid is None:
+            raise FixtureError(422, {"error": "unresolved_request_ref",
+                                     "collection": col.name, "item_index": position, "request": item_name})
+        await conn.execute(
+            "INSERT INTO collection_items (collection_id, request_id, position) VALUES ($1, $2, $3)",
+            cid, rid, position)
 
-### Backfill / migration
+# any raised FixtureError -> route maps to HTTPException(422, ...) and the txn rolls back -> DB unchanged
+return FixtureImportResponse(**counts, warnings=warnings)
+```
 
-- **None.** `requests.capture` is `NOT NULL DEFAULT '{}'::jsonb`. Existing rows materialise the default at `ALTER TABLE` time. Idempotent re-runs of `schema.sql` no-op. No data movement.
+(Each `INSERT INTO evaluations` / `collection_items` is shown one-row-at-a-time
+for clarity; the builder may batch into a single multi-row `INSERT ... VALUES
+(...),(...),...` per parent — pure perf, no semantic change. `executemany` is
+fine too.)
 
-### Data-layer items for builder (ordered)
+### Export read-sequence — exact pseudocode
 
-1. Append the one DDL line to `api/shared/schema.sql` directly below the `CREATE TABLE requests (...)` block (between `schema.sql:35` and `schema.sql:36`) — exactly: `ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;`
-2. Append `CREATE INDEX IF NOT EXISTS runs_created_at_idx ON runs (created_at DESC);` after `schema.sql:114`.
-3. Update `api/requests/schemas.py`: add `capture` to `CreateRequestRequest` (with `field_validator`), `UpdateRequestRequest` (optional), and `RequestResponse`. Import `re` and `field_validator` from `pydantic`.
-4. Update `api/requests/routes.py`: INSERT/UPDATE/SELECT include `capture`; `_row_to_response` parses JSONB → dict; passes through to `RequestResponse`.
-5. Update `api/runs/schemas.py`: add `RunEvaluationResult`, `RunRequestResult`, `RunEvidence`. Swap `RunResponse.evidence` type from `dict[str, Any]` to `RunEvidence`. Add `model_config = ConfigDict(extra="forbid")` to `CreateRunRequest`. Import `ConfigDict` from `pydantic`.
-6. Update `api/runs/routes.py:36-54`: `_row_to_response` round-trips through `RunEvidence.model_validate(evidence or {"requests": []})`. No try/except — engine bugs surface as 500.
-7. Refactor `api/runs/engine.py`:
-   - Swap `from api.environments.routes import load_substitution_map` for `from api.environments.substitution import load_substitution_map` (Architect's Components, `SPEC.md:390`).
-   - Replace held-connection pattern (`engine.py:250-353`) with three short-lived acquires: mark-running (with `WHERE status='pending'` guard + `RETURNING id`), batched read (queries 4a + 4b above), terminal UPDATE (`WHERE status='running'` guard).
-   - Build per-request results as typed `RunRequestResult` (not raw dicts); aggregate into `RunEvidence`; persist via `json.dumps(evidence.model_dump(mode="json"))` for the `$3::jsonb` bind.
-   - Track `substitution_missed: list[str]` per request using the authoritative regex `re.findall(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}", json.dumps(post_sub_payload))` (`SPEC.md:454`).
-   - Apply captures post-`_execute_request`: maintain an engine-local `captured_dict: dict[str, str]` for the current request. For each `(name, path)` in `request_row["capture"]`, run `_resolve_path(response_body, path)`; if not `_MISSING`, set `subs[name] = str(value)` AND `captured_dict[name] = str(value)`. When building `RunRequestResult`, write `captured=sorted(captured_dict.keys())` — keys only, schema-enforced (`list[str]`). The real values stay in the engine-local `subs` map for downstream requests; they are never serialised.
-   - Drop the `json.loads(json.dumps(...))` deep-copy at `engine.py:227` — `r.json()` returns fresh objects already.
-   - Verdict aggregation: compute per-request `passed` first (`transport_error is None` AND evals non-empty AND all evals passed), then run-level per `SPEC.md:471-483`.
-8. Confirm `api/environments/substitution.py` (the new non-FastAPI module per `SPEC.md:390`) is the import target — the data layer depends on this refactor landing so the engine doesn't transitively import FastAPI.
+```text
+# Route: api/collections/routes.py — GET /v1/collections/{id}/export, require_user
+async def build_export(conn, collection_id):
+    col = await conn.fetchrow("SELECT id, name, description FROM collections WHERE id = $1", collection_id)
+    if col is None:
+        raise HTTPException(404, {"error": "collection_not_found"})
 
-### Test coverage (data-focused, eval-seed required cases)
+    items = await conn.fetch(
+        """
+        SELECT ci.position, r.id AS rid, r.name, r.method, r.url, r.headers, r.body, r.capture
+        FROM collection_items ci JOIN requests r ON r.id = ci.request_id
+        WHERE ci.collection_id = $1 ORDER BY ci.position
+        """, collection_id)
 
-1. **`requests.capture` roundtrip.** POST a request with `capture={"PARENT_REQ_ID": "$.id", "AUTH": "$.token"}`. GET it back. Assert `response.capture == {"PARENT_REQ_ID": "$.id", "AUTH": "$.token"}` byte-equal (dict comparison). PUT/PATCH with `capture={"X": "$.x"}` replaces wholesale. Slice-1 seed at `~/github/pagehub-io/platform/evals/seeds/pagehub_evals_evaluations.py:63` already exercises this shape — must not regress.
-2. **Capture key validation.** POST with `capture={"1bad": "$.x"}` → 422 (leading digit). POST with `capture={"x"*65: "$.x"}` → 422 (key too long). POST with 33 keys → 422 (too many).
-3. **`RunEvidence` parses cleanly post-terminal.** Create a run that exercises 2 requests with capture/substitution; poll until terminal; `GET /v1/runs/{id}` returns an `evidence` payload that Pydantic-validates against `RunEvidence` without falling back to defaults — `requests` non-empty, every `RunRequestResult` has `passed: bool`, `response_status: int`, `substitution_missed: list`, `captured: list[str]` (keys-only by schema). Additionally assert no captured *value* leaked into the persisted blob: the response body of the run-detail GET MUST NOT contain any of the secret values the engine substituted (substring scan).
-4. **Empty-collection edge case (`SPEC.md:73-79`).** POST a run with `collection_id=null`. Poll to terminal. Assert `status='error'`, `verdict='error'`, `evidence == {"requests": []}`, `harness_claim` preserved byte-equal to POST body, `started_at` AND `finished_at` both non-null.
-5. **`runs.verdict` domain.** Across the full seed run, assert `verdict in {None, "passed", "failed", "error"}` at every observed state. `None` only while `status in {"pending", "running"}`.
-6. **Write-once: `harness_claim` immutability.** POST with a 500-char claim including newlines and unicode. GET immediately (status `pending`). GET after terminal. Assert byte-equality across both reads and the original POST body.
-7. **PATCH-403 from both auth kinds (`SPEC.md:50, 124`).** Mint a harness key, POST a run as that key, PATCH with empty body, PATCH with `{"verdict": "passed"}` — every PATCH returns 403 regardless of body content. Repeat as operator JWT.
-8. **`CreateRunRequest.extra="forbid"`.** POST with `{"verdict": "passed", "harness_claim": "I did it"}` → 422 (extra-field rejected at schema layer, not 202-with-drop). Schema-level half of the write-once contract.
-9. **Schema idempotency.** Restart the API; on the second lifespan boot `apply_schema()` runs again; pre-existing `requests` rows still have their `capture` values intact (re-run of `ADD COLUMN IF NOT EXISTS` is a no-op). Engine continues to function against existing data.
-10. **Double-dispatch defense.** Fire `execute_run(run_id)` twice for the same `run_id` (direct import in a unit test). Assert exactly one terminal UPDATE landed: `finished_at` unchanged across the second invocation, single `run.completed` event row keyed by `target_id`.
+    # requests[]: distinct, in first-referenced (== position) order
+    seen, requests_out, ordered_rids = set(), [], []
+    for it in items:
+        if it["rid"] not in seen:
+            seen.add(it["rid"]); ordered_rids.append(it["rid"])
+            requests_out.append({...})          # name, method, url, headers, body, capture — NO id/owner/timestamps
 
-AGREE: yes
+    evals = await conn.fetch(
+        """
+        SELECT request_id, name, kind, config FROM evaluations
+        WHERE request_id = ANY($1::uuid[]) ORDER BY request_id, created_at, name
+        """, ordered_rids)                      # ONE batched query — no N+1
+    # group evals by request_id, attach inline to each requests_out entry in created_at-then-name order
 
-SCORE: 2
+    return FixtureBundle(
+        version=1,
+        environments=[],                        # ALWAYS [] on export (SPEC) — never key-omitted
+        requests=requests_out,
+        collections=[{"name": col["name"], "description": col["description"],
+                      "items": [it["name"] for it in items]}])      # request NAME strings, position order
+```
 
-## Architect — Reconciliation
+3 queries, no N+1. `environments: []` is literal (an empty list field, not an
+omitted key) so the round-trip normal form is stable.
 
-### Resolved
-
-- **`RunRequestResult.captured` is `list[str]`, not `dict[str, str]`** (Data, CRITICAL). The keys-only rule is now enforced by the schema type rather than by engine convention + a separate redaction pass. Engine builds a run-local `captured_dict: dict[str, str]` for the in-process `subs` map; only `sorted(captured_dict.keys())` is persisted. Updated PLAN's Data schema block, the worked-example JSON, the Security mitigations list (item 5), the Security open-concerns list (removed the now-decided question), the Data builder-items list (item 7), and the Data test list (item 3). Mirrored the change in `SPEC.md ## Architect / Pydantic shapes`. Designer's keys-only caption (`SPEC.md:232-233`) needs no change — already aligned.
-- **Redaction-pass ordering is explicit and validation runs AFTER redaction** (Data, IMPORTANT). Added a new `#### Redaction-pass ordering (mandatory, in this order)` subsection to `## Data` immediately after the worked-example JSON. Four steps: (a) build raw dict, (b) `_redact_secrets(secret_values_set, result_dict)` mutates url + every header value + body excerpt in place, (c) build `captured: list[str]` from the local dict's keys, (d) `RunRequestResult.model_validate(result_dict)` then `RunEvidence.model_dump(mode="json")` for the `::jsonb` bind. Builder is told validate-AFTER-redact.
-- **DEBUG-log fields tightened** (Reliability, NIT). Dropped post-substitution `url` from the DEBUG line — URLs can carry secrets in querystrings. Kept `method`, `host` (hostname only), `status`, `latency_ms`.
-- **Collection-size cap is route-level, not a DB constraint** (Data, NIT). Added a row to the integrity table calling out the 50-item cap as enforced in the `POST /v1/runs` handler via a count query; intentionally NOT a check constraint on `collection_items` because operators may author large collections for non-run uses.
-- **`_row_to_response` decode-fallback-validate ordering promoted** (Data, NIT). The decode-to-dict-first / fallback-default / then-`model_validate` ordering is now stated next to the schema-validate line in the Pydantic-shape section and echoed in the defensive-read-side subsection, instead of living only in the latter.
-
-### Why
-
-- The `captured` change came from Data (CRITICAL). Security's keys-only rule existed only as a comment + redaction step before; promoting it to a schema type closes the gap mechanically. Security signed off (the open-concern is now decided), no further work for them.
-- The redaction-ordering change came from Data (IMPORTANT). Validation before redaction would have left a window where a `RunRequestResult` instance carrying secrets briefly exists, inviting mutation bugs.
-- DEBUG-URL tightening came from Security (NIT) reinforced by the redaction-ordering work — if we redact on persist but log raw URLs at DEBUG, we have leaked anyway.
-- 50-cap clarification and `_row_to_response` ordering both came from Data (NITs).
-
-### Left as-is
-
-- Security: `AGREE: yes, SCORE: 2` — no architectural drift introduced by the reconciliation. The keys-only schema change strengthens, doesn't relax, the original Security plan. All other Security mitigations (SSRF helper, header sanitizer, secret-value redaction on `url` + `response_headers` + `response_body_excerpt`, no `verify=False`, no twin-overrides in engine, no body/header values in logs) stand unchanged.
-- Reliability: `AGREE: yes, SCORE: 3` — no architectural drift. SSRF DNS-lookup latency NIT and redaction-perf NIT were both acknowledged-but-deferred (slice-2 scale tolerates both); they remain acknowledged-but-deferred. The two-acquire connection lifecycle, guarded transitions, 10s per-request timeout, 50-item cap, and Sentry-only-for-unexpected rules are unchanged.
-- Manager / Designer: unaffected. The Designer's keys-only caption (`SPEC.md:232-233`) already matches the new schema shape.

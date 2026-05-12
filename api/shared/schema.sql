@@ -36,6 +36,21 @@ CREATE TABLE IF NOT EXISTS requests (
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS requests_owner_idx ON requests (owner_user_id);
 
+-- Idempotent: re-runnable every boot. Postgres has no ADD CONSTRAINT IF NOT
+-- EXISTS, so guard on pg_constraint. Fixture import upserts requests by
+-- (owner_user_id, name); without this, ON CONFLICT has no arbiter and
+-- "re-import is idempotent" is impossible. The constraint name matches what
+-- Postgres auto-generates for UNIQUE (owner_user_id, name).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'requests_owner_user_id_name_key'
+    ) THEN
+        ALTER TABLE requests
+            ADD CONSTRAINT requests_owner_user_id_name_key UNIQUE (owner_user_id, name);
+    END IF;
+END $$;
+
 -- Per-request response assertions. Multiple per request.
 CREATE TABLE IF NOT EXISTS evaluations (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -68,6 +83,25 @@ CREATE TABLE IF NOT EXISTS collection_items (
     UNIQUE (collection_id, position)
 );
 CREATE INDEX IF NOT EXISTS collection_items_collection_idx ON collection_items (collection_id);
+
+-- Server-driven chess games for the in-repo chess module (api/modules/chess).
+-- Durable on purpose: a deploy landing mid-run must not drop the board.
+-- Unauthenticated / anonymous — no owner column; rows are ephemeral-ish and a
+-- slice-N reaper can prune by created_at (not this slice).
+CREATE TABLE IF NOT EXISTS chess_games (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    engine_color  TEXT NOT NULL CHECK (engine_color IN ('white', 'black')),  -- side the server engine plays
+    seed          BIGINT NOT NULL,                     -- engine RNG seed, from the /games request body (default 0)
+    starting_fen  TEXT NOT NULL,                       -- FEN the game opened from (startpos by default) — for replay
+    fen           TEXT NOT NULL,                       -- current position
+    move_history  JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ordered UCI moves played (both sides); evidence + per-ply RNG replay
+    move_count    INTEGER NOT NULL DEFAULT 0,          -- == jsonb_array_length(move_history); the ply index
+    -- 'illegal_move' is a transient response status, never persisted — not in this set.
+    status        TEXT NOT NULL DEFAULT 'in_progress'
+                  CHECK (status IN ('in_progress', 'harness_won', 'harness_lost', 'draw')),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- Per-harness API keys. Each LLM agent (or harness installation) gets
 -- a key minted by an operator; the secret is hashed at rest (Fernet
