@@ -51,7 +51,7 @@
         "chess-46-bad-fen-create-422",
         "chess-47-bad-fen-legal-moves-422"
       ],
-      "name": "chess-rules"
+      "name": "eval-chess-backend"
     }
   ],
   "environments": [
