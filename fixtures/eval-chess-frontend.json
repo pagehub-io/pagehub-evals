@@ -1,0 +1,1170 @@
+{
+  "collections": [
+    {
+      "description": "Chess rule-conformance battery for the eval-chess-frontend pure-frontend chess web app (Vite + TS + chess.js, exposed DOM contract). Each rule is a sequence of pagehub-browser calls (type fen-input, click apply-fen, type uci-input, click submit-move, get-attribute data-fen / data-status off [data-testid=\"board\"]). Covers: legal move accepted (data-fen changes); illegal-given-position rejected (data-fen UNCHANGED); kingside castling; queenside castling; castling rights respected (no-K-right -> e1g1 rejected); en passant capture; promotion to queen; pinned piece cannot move; checkmate -> data-status=\"white_won\"; stalemate -> data-status=\"draw\"; 50-move rule (halfmove 99 -> non-pawn non-capture -> data-status=\"draw\"). All FENs python-chess-derived; terminal assertions are claim-aware. Dropped (tight on the 50-item collection cap; documented here so future readers know what is NOT covered): threefold repetition (8 setup moves = ~20 requests, blew the cap); underpromotion to N/R/B (engine-identical to queen for the rule-conformance check); castle-through-check and move-into-check as separate scenarios (same underlying rule as pin: a move that leaves the own king in check is rejected, exercised by S5).",
+      "items": [
+        "lifecycle-01-create-session",
+        "lifecycle-02-navigate",
+        "s1-castle-k-type-fen",
+        "s1-castle-k-apply",
+        "s1-castle-k-type-uci-e1g1",
+        "s1-castle-k-submit-e1g1",
+        "s1-castle-k-verify-fen-post-castle",
+        "s1-castle-k-type-uci-illegal-repeat",
+        "s1-castle-k-submit-illegal-repeat",
+        "s1-castle-k-verify-fen-still-post-castle",
+        "s2-rights-q-type-fen",
+        "s2-rights-q-apply",
+        "s2-rights-q-type-uci-e1g1",
+        "s2-rights-q-submit-e1g1-rejected",
+        "s2-rights-q-verify-fen-unchanged",
+        "s2-rights-q-type-uci-e1c1",
+        "s2-rights-q-submit-e1c1",
+        "s2-rights-q-verify-fen-q-castled",
+        "s3-en-passant-type-fen",
+        "s3-en-passant-apply",
+        "s3-en-passant-type-uci-e5d6",
+        "s3-en-passant-submit-e5d6",
+        "s3-en-passant-verify-fen",
+        "s4-promotion-q-type-fen",
+        "s4-promotion-q-apply",
+        "s4-promotion-q-type-uci-b7b8q",
+        "s4-promotion-q-submit-b7b8q",
+        "s4-promotion-q-verify-fen",
+        "s5-pin-type-fen",
+        "s5-pin-apply",
+        "s5-pin-type-uci-e2c3",
+        "s5-pin-submit-e2c3",
+        "s5-pin-verify-fen-unchanged",
+        "s6-mate-type-fen",
+        "s6-mate-apply",
+        "s6-mate-type-uci-a1a8",
+        "s6-mate-submit-a1a8",
+        "s6-mate-verify-status",
+        "s7-stalemate-type-fen",
+        "s7-stalemate-apply",
+        "s7-stalemate-type-uci-f5f7",
+        "s7-stalemate-submit-f5f7",
+        "s7-stalemate-verify-status",
+        "s8-fifty-type-fen",
+        "s8-fifty-apply",
+        "s8-fifty-type-uci-a1a2",
+        "s8-fifty-submit-a1a2",
+        "s8-fifty-verify-status",
+        "lifecycle-99-delete-session"
+      ],
+      "name": "eval-chess-frontend"
+    }
+  ],
+  "environments": [
+    {
+      "name": "chess-frontend-local",
+      "secrets": {},
+      "variables": {
+        "eval-chess-frontend_url": "http://localhost:8004",
+        "pagehub-browser_url": "http://localhost:4010"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "body": {
+        "headless": true
+      },
+      "capture": {
+        "SID": "$.session_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 201
+          },
+          "kind": "status_eq",
+          "name": "create-session-201"
+        }
+      ],
+      "method": "POST",
+      "name": "lifecycle-01-create-session",
+      "url": "{{pagehub-browser_url}}/v1/sessions"
+    },
+    {
+      "body": {
+        "url": "{{eval-chess-frontend_url}}",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "navigate-200"
+        }
+      ],
+      "method": "POST",
+      "name": "lifecycle-02-navigate",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-type-uci-e1g1",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-submit-e1g1",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s1-k-castle-fen-200"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R4RK1 b kq - 1 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s1-k-castle-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-verify-fen-post-castle",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-type-uci-illegal-repeat",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-submit-illegal-repeat",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s1-illegal-fen-unchanged-200"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R4RK1 b kq - 1 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s1-illegal-fen-unchanged"
+        }
+      ],
+      "method": "POST",
+      "name": "s1-castle-k-verify-fen-still-post-castle",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w Qkq - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e1g1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-type-uci-e1g1",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-submit-e1g1-rejected",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s2-k-disallowed-fen-unchanged-200"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w Qkq - 0 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s2-k-disallowed-fen-unchanged"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-verify-fen-unchanged",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e1c1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-type-uci-e1c1",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-submit-e1c1",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s2-q-castle-fen-200"
+        },
+        {
+          "config": {
+            "expected": "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/2KR3R b kq - 1 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s2-q-castle-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "s2-rights-q-verify-fen-q-castled",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s3-en-passant-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s3-en-passant-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e5d6"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s3-en-passant-type-uci-e5d6",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s3-en-passant-submit-e5d6",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s3-ep-fen-200"
+        },
+        {
+          "config": {
+            "expected": "4k3/8/3P4/8/8/8/8/4K3 b - - 0 2",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s3-ep-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "s3-en-passant-verify-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "8/1P6/8/8/4k3/8/8/4K3 w - - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s4-promotion-q-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s4-promotion-q-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "b7b8q"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s4-promotion-q-type-uci-b7b8q",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s4-promotion-q-submit-b7b8q",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s4-promo-fen-200"
+        },
+        {
+          "config": {
+            "expected": "1Q6/8/8/8/4k3/8/8/4K3 b - - 0 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s4-promo-fen"
+        }
+      ],
+      "method": "POST",
+      "name": "s4-promotion-q-verify-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s5-pin-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s5-pin-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "e2c3"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s5-pin-type-uci-e2c3",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s5-pin-submit-e2c3",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-fen",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s5-pin-fen-unchanged-200"
+        },
+        {
+          "config": {
+            "expected": "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s5-pin-fen-unchanged"
+        }
+      ],
+      "method": "POST",
+      "name": "s5-pin-verify-fen-unchanged",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s6-mate-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s6-mate-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "a1a8"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s6-mate-type-uci-a1a8",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s6-mate-submit-a1a8",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-status",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s6-mate-status-200"
+        },
+        {
+          "config": {
+            "expected": "white_won",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s6-mate-status"
+        }
+      ],
+      "method": "POST",
+      "name": "s6-mate-verify-status",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "7k/8/6K1/5Q2/8/8/8/8 w - - 0 1"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s7-stalemate-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s7-stalemate-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "f5f7"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s7-stalemate-type-uci-f5f7",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s7-stalemate-submit-f5f7",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-status",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s7-stalemate-status-200"
+        },
+        {
+          "config": {
+            "expected": "draw",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s7-stalemate-status"
+        }
+      ],
+      "method": "POST",
+      "name": "s7-stalemate-verify-status",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "fen-input"
+        },
+        "text": "4k3/8/8/8/8/8/8/R3K3 w - - 99 60"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s8-fifty-type-fen",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "apply-fen"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-apply-fen-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s8-fifty-apply",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "clear": true,
+        "locator": {
+          "strategy": "testid",
+          "value": "uci-input"
+        },
+        "text": "a1a2"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "type-uci-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s8-fifty-type-uci-a1a2",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/type"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "submit-move"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "click-submit-ok"
+        }
+      ],
+      "method": "POST",
+      "name": "s8-fifty-submit-a1a2",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-status",
+        "locator": {
+          "strategy": "testid",
+          "value": "board"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "s8-fifty-status-200"
+        },
+        {
+          "config": {
+            "expected": "draw",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "s8-fifty-status"
+        }
+      ],
+      "method": "POST",
+      "name": "s8-fifty-verify-status",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "evaluations": [
+        {
+          "config": {
+            "expected": 204
+          },
+          "kind": "status_eq",
+          "name": "delete-session-204"
+        }
+      ],
+      "method": "DELETE",
+      "name": "lifecycle-99-delete-session",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}"
+    }
+  ],
+  "version": 1
+}
