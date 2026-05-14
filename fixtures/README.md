@@ -58,6 +58,16 @@ lives in the OpenAPI docs (`/docs`, `/redoc`) — `FixtureBundle`,
   `environments: []`, the collection, every request it references, every
   evaluation on those requests. Pipe it to `fixtures/<name>.json`. Served
   inline as `application/json` (no `Content-Disposition`).
+- **Fetch on-disk source:** `GET /v1/fixtures/{name}` (operator JWT) returns
+  the **byte-identical** contents of `fixtures/<name>.json` — same length,
+  same whitespace, no parse-and-reformat round-trip. Companion to
+  `POST /v1/fixtures/import`: that one *consumes* a bundle, this one
+  *serves* the canonical source. `name` matches `^[a-z0-9][a-z0-9-]*$` (the
+  file stem), so traversal-shaped values are rejected by the router before
+  the handler runs. 404 if no file with that name exists in `fixtures/`.
+  Use case: pagehub-benchmarks injects the exact fixture bytes the grader
+  will use into the build prompt, so "what the harness sees" ≡ "what the
+  grader will check."
 
 ## Declarative desired-state — the one surprise
 

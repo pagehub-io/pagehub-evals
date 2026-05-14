@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import Path as PathParam
 
 from api.dependencies import AuthContext, require_user
 from api.fixtures.engine import FixtureImportError, import_bundle
@@ -34,6 +36,15 @@ from api.shared.events import record_event
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/fixtures")
+
+# On-disk fixtures directory: repo root / fixtures.
+# api/fixtures/routes.py -> parents[2] = repo root.
+FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
+
+# Path-param regex (also enforced by FastAPI's validator before the handler
+# runs). Matches the on-disk file stem; the route handler reconstructs
+# `<name>.json` and rejects anything that would escape FIXTURES_DIR.
+_FIXTURE_NAME_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 
 # The raw request body is bounded *before* JSON parsing by
 # api.fixtures._body_limit.FixtureBodyLimitMiddleware (Starlette has no
@@ -130,3 +141,48 @@ async def import_fixture(
         len(result.warnings),
     )
     return result
+
+
+@router.get(
+    "/{name}",
+    responses={
+        200: {
+            "content": {"application/json": {}},
+            "description": "Raw checked-in fixture bundle bytes.",
+        },
+        404: {"description": "No fixture file with that name."},
+        422: {"description": "Name does not match the allowed pattern."},
+    },
+    response_model=None,
+    summary="Fetch a checked-in fixture bundle by name (byte-identical to file).",
+)
+async def get_fixture(
+    name: str = PathParam(..., pattern=_FIXTURE_NAME_PATTERN, examples=["eval-chess-frontend"]),
+    _auth: AuthContext = Depends(require_user),
+) -> Response:
+    """Return the bytes of ``fixtures/<name>.json`` as ``application/json``.
+
+    Companion to ``POST /v1/fixtures/import``: that endpoint *consumes* a
+    fixture bundle, this one *serves* the canonical on-disk source. Callers
+    (e.g. pagehub-benchmarks injecting a grader fixture into a build prompt)
+    get exactly what's checked into ``fixtures/<name>.json`` — same bytes,
+    same byte length, no parse-and-reformat round-trip.
+    """
+    # Reconstruct + resolve; reject any path that escapes FIXTURES_DIR.
+    # (Belt-and-braces — the route-level pattern already rejects ``..``,
+    # ``/``, and the leading ``.`` of dotfiles. The resolve+is_relative_to
+    # check is the load-bearing guard against future regex regressions.)
+    candidate = (FIXTURES_DIR / f"{name}.json").resolve()
+    try:
+        candidate.relative_to(FIXTURES_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"fixture {name!r} not found") from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail=f"fixture {name!r} not found")
+
+    data = candidate.read_bytes()
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Length": str(len(data))},
+    )
