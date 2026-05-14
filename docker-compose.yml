@@ -47,6 +47,11 @@ services:
       - "8002:8000"
     volumes:
       - ./api:/app/api
+      # Mount fixtures/ read-only so GET /v1/fixtures/{name} serves the
+      # same checked-in bytes the operator edits locally — no rebuild
+      # needed after editing a fixture in dev. The Dockerfile also COPIes
+      # fixtures/ into the image for prod, where there's no host mount.
+      - ./fixtures:/app/fixtures:ro
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:

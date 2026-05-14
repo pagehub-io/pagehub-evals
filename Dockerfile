@@ -11,6 +11,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api/ ./api/
 
+# Checked-in fixture bundles served byte-identically by
+# GET /v1/fixtures/{name}. The route resolves
+# api/fixtures/routes.py::FIXTURES_DIR to parents[2]/fixtures, which
+# inside the container is /app/fixtures.
+COPY fixtures/ ./fixtures/
+
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
