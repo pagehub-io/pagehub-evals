@@ -1,0 +1,1000 @@
+{
+  "collections": [
+    {
+      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app. Drives the game through pagehub-browser and asserts the 5-pillar DOM contract: (1) instant restart, (2) shareable score, (3) content-creator-friendly difficulty, (4) zero install friction, (5) payment via ads — plus gameplay-shape asserts: player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa} (frog is explicitly forbidden to keep us legally distant from Frogger), data-current-lane increments on tap, deterministic playthrough. Deterministic mode: the grader loads ?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6 — in this mode lanes do not scroll, no obstacles spawn, each tap advances exactly one lane, and game-over fires after 6 successful taps. The ground-truth simulator (in the platform seed file) is trivial under these params: expected data-current-lane after N taps = N. After die-after fires, the grader exercises pillar 2 (share-url contains score=6 and seed=hop-test-001), pillar 5 (interstitial ad slot + dismiss), then pillar 1 (tap on game-root flips state back to playing, score resets to 0). Finally, the grader visits the share URL with a fresh navigate to assert the shared-score-banner renders. Items numbered ~35; well under the 50-item collection cap.",
+      "items": [
+        "lifecycle-01-create-session",
+        "lifecycle-02-navigate",
+        "p4-zero-install-state-playing",
+        "p4-no-password-inputs",
+        "p4-no-email-inputs",
+        "p4-no-signin-testids",
+        "p4-no-signup-testids",
+        "p4-no-login-testids",
+        "gshape-player-species-allowlisted",
+        "gshape-initial-current-lane",
+        "gshape-initial-score",
+        "p3-difficulty-active-echo",
+        "p5-ad-slot-banner-exists",
+        "tap-1-click",
+        "tap-1-lane-check",
+        "tap-2-click",
+        "tap-2-lane-check",
+        "tap-3-click",
+        "tap-3-lane-check",
+        "tap-4-click",
+        "tap-4-lane-check",
+        "tap-5-click",
+        "tap-5-lane-check",
+        "tap-6-click",
+        "tap-6-lane-check",
+        "tap-6-game-state-game-over",
+        "p2-share-url-contains-score",
+        "p2-share-url-contains-seed",
+        "p5-ad-slot-interstitial-exists",
+        "p5-ad-close-click",
+        "p1-restart-tap",
+        "p1-restart-state-playing",
+        "p1-restart-current-lane-zero",
+        "p1-restart-score-zero",
+        "p2-visit-share-url",
+        "p2-shared-score-banner-visible",
+        "lifecycle-99-delete-session"
+      ],
+      "name": "eval-game-hoppers"
+    }
+  ],
+  "environments": [
+    {
+      "name": "hoppers-local",
+      "secrets": {},
+      "variables": {
+        "eval-game-hoppers_url": "http://host.docker.internal:8005",
+        "pagehub-browser_url": "http://host.docker.internal:4010"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "body": {
+        "headless": true
+      },
+      "capture": {
+        "SID": "$.session_id"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 201
+          },
+          "kind": "status_eq",
+          "name": "create-session-201"
+        }
+      ],
+      "method": "POST",
+      "name": "lifecycle-01-create-session",
+      "url": "{{pagehub-browser_url}}/v1/sessions"
+    },
+    {
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "navigate-200"
+        }
+      ],
+      "method": "POST",
+      "name": "lifecycle-02-navigate",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate"
+    },
+    {
+      "body": {
+        "attribute": "data-game-state",
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-zero-install-200"
+        },
+        {
+          "config": {
+            "expected": "playing",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-zero-install-state-playing"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-zero-install-state-playing",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "input[type='password']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-no-password-inputs-200"
+        },
+        {
+          "config": {
+            "expected": 0,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-no-password-inputs-count-0"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-no-password-inputs",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "input[type='email']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-no-email-inputs-200"
+        },
+        {
+          "config": {
+            "expected": 0,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-no-email-inputs-count-0"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-no-email-inputs",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid*='sign-in']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-no-signin-testids-200"
+        },
+        {
+          "config": {
+            "expected": 0,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-no-signin-testids-count-0"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-no-signin-testids",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid*='sign-up']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-no-signup-testids-200"
+        },
+        {
+          "config": {
+            "expected": 0,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-no-signup-testids-count-0"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-no-signup-testids",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid*='login']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p4-no-login-testids-200"
+        },
+        {
+          "config": {
+            "expected": 0,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p4-no-login-testids-count-0"
+        }
+      ],
+      "method": "POST",
+      "name": "p4-no-login-testids",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid='player'][data-hopper-species='kangaroo'], [data-testid='player'][data-hopper-species='rabbit'], [data-testid='player'][data-hopper-species='grasshopper'], [data-testid='player'][data-hopper-species='flea'], [data-testid='player'][data-hopper-species='jerboa']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "gshape-species-200"
+        },
+        {
+          "config": {
+            "expected": 1,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "gshape-species-one-of-five"
+        }
+      ],
+      "method": "POST",
+      "name": "gshape-player-species-allowlisted",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "gshape-current-lane-200"
+        },
+        {
+          "config": {
+            "expected": "0",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "gshape-current-lane-zero"
+        }
+      ],
+      "method": "POST",
+      "name": "gshape-initial-current-lane",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "score"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "gshape-score-text-200"
+        },
+        {
+          "config": {
+            "expected": "0",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "gshape-score-text-zero"
+        }
+      ],
+      "method": "POST",
+      "name": "gshape-initial-score",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "difficulty-active"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p3-difficulty-active-200"
+        },
+        {
+          "config": {
+            "expected": "lane-speed=0|lane-density=0|seed=hop-test-001",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "p3-difficulty-active-echo"
+        }
+      ],
+      "method": "POST",
+      "name": "p3-difficulty-active-echo",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "ad-slot-banner"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p5-ad-banner-200"
+        },
+        {
+          "config": {
+            "expected": 1,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p5-ad-banner-count-1"
+        }
+      ],
+      "method": "POST",
+      "name": "p5-ad-slot-banner-exists",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-1-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-1-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-1-lane-200"
+        },
+        {
+          "config": {
+            "expected": "1",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-1-lane-one"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-1-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-2-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-2-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-2-lane-200"
+        },
+        {
+          "config": {
+            "expected": "2",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-2-lane-two"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-2-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-3-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-3-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-3-lane-200"
+        },
+        {
+          "config": {
+            "expected": "3",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-3-lane-three"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-3-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-4-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-4-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-4-lane-200"
+        },
+        {
+          "config": {
+            "expected": "4",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-4-lane-four"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-4-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-5-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-5-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-5-lane-200"
+        },
+        {
+          "config": {
+            "expected": "5",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-5-lane-five"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-5-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-6-click-200"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-6-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-6-lane-200"
+        },
+        {
+          "config": {
+            "expected": "6",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-6-lane-six"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-6-lane-check",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "attribute": "data-game-state",
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "tap-6-game-over-200"
+        },
+        {
+          "config": {
+            "expected": "game-over",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "tap-6-game-over-state"
+        }
+      ],
+      "method": "POST",
+      "name": "tap-6-game-state-game-over",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "attribute": "data-url",
+        "locator": {
+          "strategy": "testid",
+          "value": "share-url"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p2-share-url-score-200"
+        },
+        {
+          "config": {
+            "needle": "score=6"
+          },
+          "kind": "body_contains",
+          "name": "p2-share-url-contains-score-6"
+        }
+      ],
+      "method": "POST",
+      "name": "p2-share-url-contains-score",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "attribute": "data-url",
+        "locator": {
+          "strategy": "testid",
+          "value": "share-url"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p2-share-url-seed-200"
+        },
+        {
+          "config": {
+            "needle": "seed=hop-test-001"
+          },
+          "kind": "body_contains",
+          "name": "p2-share-url-contains-seed-hop-test-001"
+        }
+      ],
+      "method": "POST",
+      "name": "p2-share-url-contains-seed",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "ad-slot-interstitial"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p5-ad-interstitial-200"
+        },
+        {
+          "config": {
+            "expected": 1,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "p5-ad-interstitial-count-1"
+        }
+      ],
+      "method": "POST",
+      "name": "p5-ad-slot-interstitial-exists",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "ad-close"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p5-ad-close-200"
+        }
+      ],
+      "method": "POST",
+      "name": "p5-ad-close-click",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p1-restart-tap-200"
+        }
+      ],
+      "method": "POST",
+      "name": "p1-restart-tap",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click"
+    },
+    {
+      "body": {
+        "attribute": "data-game-state",
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p1-restart-state-200"
+        },
+        {
+          "config": {
+            "expected": "playing",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "p1-restart-state-playing"
+        }
+      ],
+      "method": "POST",
+      "name": "p1-restart-state-playing",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "attribute": "data-current-lane",
+        "locator": {
+          "strategy": "testid",
+          "value": "player"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p1-restart-lane-200"
+        },
+        {
+          "config": {
+            "expected": "0",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "p1-restart-lane-zero"
+        }
+      ],
+      "method": "POST",
+      "name": "p1-restart-current-lane-zero",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "score"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p1-restart-score-200"
+        },
+        {
+          "config": {
+            "expected": "0",
+            "path": "$.text"
+          },
+          "kind": "json_path_eq",
+          "name": "p1-restart-score-zero"
+        }
+      ],
+      "method": "POST",
+      "name": "p1-restart-score-zero",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text"
+    },
+    {
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?score=6&seed=hop-test-001",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p2-visit-share-url-200"
+        }
+      ],
+      "method": "POST",
+      "name": "p2-visit-share-url",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "shared-score-banner"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "p2-shared-banner-200"
+        },
+        {
+          "config": {
+            "needle": "6"
+          },
+          "kind": "body_contains",
+          "name": "p2-shared-banner-shows-score"
+        }
+      ],
+      "method": "POST",
+      "name": "p2-shared-score-banner-visible",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text"
+    },
+    {
+      "evaluations": [
+        {
+          "config": {
+            "expected": 204
+          },
+          "kind": "status_eq",
+          "name": "delete-session-204"
+        }
+      ],
+      "method": "DELETE",
+      "name": "lifecycle-99-delete-session",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}"
+    }
+  ],
+  "version": 1
+}
