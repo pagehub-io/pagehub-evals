@@ -7,7 +7,9 @@
 # superset: it adds pytest, pytest-asyncio, ruff, which must NOT be
 # bundled into the serverless function).
 fastapi==0.136.1
-starlette==0.52.1
+# Kept in lockstep with repo-root requirements.txt (see comment there
+# for the PYSEC-2026-161 bump rationale).
+starlette>=1.0.1,<2.0.0
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
