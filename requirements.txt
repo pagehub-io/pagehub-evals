@@ -1,5 +1,11 @@
 fastapi==0.136.1
-starlette==0.52.1
+# Bumped from 0.52.1 for PYSEC-2026-161 (Host header validation / path
+# poisoning / auth bypass). Fix is starlette 1.0.1, which is the
+# Kludex/starlette successor to encode/starlette — Marcelo Trylesinski
+# is now the maintainer. FastAPI 0.136.1 declares starlette>=0.46.0 and
+# the 1.0 surface (BaseHTTPMiddleware, types, Request, Response, etc.) is
+# the same API pagehub-evals uses; smoke-tested locally with TestClient.
+starlette>=1.0.1,<2.0.0
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.0

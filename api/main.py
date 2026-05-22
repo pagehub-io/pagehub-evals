@@ -1,7 +1,18 @@
 """FastAPI application entry point for pagehub-evals."""
 
+# Centralized NR + Sentry init from pagehub-infra's fleet bootstrap. MUST
+# stay the first import in this module so the agents monkey-patch
+# httpx/asyncpg/FastAPI before those modules load. The file is dropped at
+# the project root at deploy time by pagehub-infra/.github/workflows/
+# deploy-app.yml; locally it's absent and the import will ImportError,
+# which is correct — local dev doesn't need (and shouldn't ship to) NR
+# or production Sentry. ruff: noqa: F401 keeps the side-effect import.
+try:
+    import _pagehub_bootstrap  # noqa: F401
+except ImportError:
+    pass
+
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -26,35 +37,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Sentry init at module load — bypasses settings so it captures
-# errors that happen during settings loading. Requires SENTRY_DSN +
-# ENVIRONMENT + GIT_SHA + SENTRY_TRACES_SAMPLE_RATE; if any is missing,
-# Sentry stays off (no defaults — see api/config.py policy).
-_sentry_dsn = os.getenv("SENTRY_DSN", "").strip() or None
-if _sentry_dsn:
-    _env = os.getenv("ENVIRONMENT", "").strip() or None
-    _git_sha = os.getenv("GIT_SHA", "").strip() or None
-    _rate = os.getenv("SENTRY_TRACES_SAMPLE_RATE", "").strip() or None
-    if not (_env and _git_sha and _rate):
-        logger.warning(
-            "SENTRY_DSN set but ENVIRONMENT/GIT_SHA/SENTRY_TRACES_SAMPLE_RATE missing — Sentry disabled"
-        )
-    else:
-        try:
-            import sentry_sdk
-            from sentry_sdk.integrations.fastapi import FastApiIntegration
-
-            sentry_sdk.init(
-                dsn=_sentry_dsn,
-                environment=_env,
-                release=_git_sha,
-                traces_sample_rate=float(_rate),
-                integrations=[FastApiIntegration()],
-            )
-            logger.info("Sentry initialized (env=%s)", _env)
-        except ImportError:
-            logger.warning("sentry-sdk not installed, skipping Sentry init")
 
 
 @asynccontextmanager
