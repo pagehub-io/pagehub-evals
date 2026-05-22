@@ -106,11 +106,24 @@ async def root():
 @app.get("/health")
 async def health():
     settings = get_settings()
+    # Surface the fleet bootstrap's per-stage init durations so cold-start
+    # debugging (and "is NewRelic actually attached") is answerable from
+    # outside without Vercel function-log access — on Hobby tier, the
+    # function log REST API is unavailable, so /health is the only readout.
+    # `boot` is None if the bootstrap module never loaded (file missing /
+    # ImportError swallowed by the entry-module try/except).
+    boot: dict | None = None
+    try:
+        import _pagehub_bootstrap as _b
+        boot = dict(_b.BOOT_TIMINGS)
+    except ImportError:
+        pass
     return {
         "status": "ok",
         "version": "0.1.0",
         "env": settings.env,
         "git_sha": settings.git_sha,
+        "boot": boot,
     }
 
 
