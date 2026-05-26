@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app. Drives the game through pagehub-browser and asserts the 5-pillar DOM contract: (1) instant restart, (2) shareable score, (3) content-creator-friendly difficulty, (4) zero install friction, (5) payment via ads — plus gameplay-shape asserts: player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa} (frog is explicitly forbidden to keep us legally distant from Frogger), data-current-lane increments on tap, deterministic playthrough. Deterministic mode: the grader loads ?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6 — in this mode lanes do not scroll, no obstacles spawn, each tap advances exactly one lane, and game-over fires after 6 successful taps. The ground-truth simulator (in the platform seed file) is trivial under these params: expected data-current-lane after N taps = N. After die-after fires, the grader exercises pillar 2 (share-url contains score=6 and seed=hop-test-001), pillar 5 (interstitial ad slot + dismiss), then pillar 1 (tap on game-root flips state back to playing, score resets to 0). Finally, the grader visits the share URL with a fresh navigate to assert the shared-score-banner renders. Items numbered ~35; well under the 50-item collection cap.",
+      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app. Drives the game through pagehub-browser and asserts the 5-pillar DOM contract: (1) instant restart, (2) shareable score, (3) content-creator-friendly difficulty, (4) zero install friction, (5) payment via ads — plus gameplay-shape asserts: player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa} (frog is explicitly forbidden to keep us legally distant from Frogger), data-current-lane increments on tap, deterministic playthrough. Two deterministic navigations: (A) ?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6 — lanes do not scroll, no obstacles spawn, each tap advances exactly one lane, and game-over fires after 6 successful taps. The ground-truth simulator (in the platform seed file) is trivial under these params: expected data-current-lane after N taps = N. After die-after fires, the grader exercises pillar 2 (share-url contains score=6 and seed=hop-test-001), pillar 5 (interstitial ad slot + dismiss), then pillar 1 (tap on game-root flips state back to playing, score resets to 0). (B) ?seed=hop-test-001&lane-speed=0&lane-density=0.5&deterministic=1 — same deterministic mode but with density>0 so the world spawns its objects. In deterministic mode objects render at xBase positions (no drift, no collisions), letting the grader assert the gameplay SHAPE without timing flakiness: lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed for lane=1,2,3 / 4,5,6 / ...), 3 logs per riverbed (uniformly spaced, guarantees every riverbed is hopable), and obstacle-kind attribution. Finally, the grader visits the share URL with a fresh navigate to assert the shared-score-banner renders. Item count is 46, well under the 50-item collection cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -37,6 +37,15 @@
         "p1-restart-state-playing",
         "p1-restart-current-lane-zero",
         "p1-restart-score-zero",
+        "shape-01-navigate-density",
+        "shape-02-bank-count",
+        "shape-03-grass-count",
+        "shape-04-road-count",
+        "shape-05-riverbed-count",
+        "shape-06-cadence-lane-1-grass",
+        "shape-07-cadence-lane-3-riverbed",
+        "shape-08-logs-lane-3",
+        "shape-09-logs-lane-6",
         "p2-visit-share-url",
         "p2-shared-score-banner-visible",
         "lifecycle-99-delete-session"
@@ -935,6 +944,248 @@
       "method": "POST",
       "name": "p1-restart-score-zero",
       "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text"
+    },
+    {
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0.5&deterministic=1",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-01-navigate-density-200"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-01-navigate-density",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-lane-kind='bank']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-02-bank-count-200"
+        },
+        {
+          "config": {
+            "expected": 3,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-02-bank-count-3"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-02-bank-count",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-lane-kind='grass']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-03-grass-count-200"
+        },
+        {
+          "config": {
+            "expected": 2,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-03-grass-count-2"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-03-grass-count",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-lane-kind='road']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-04-road-count-200"
+        },
+        {
+          "config": {
+            "expected": 2,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-04-road-count-2"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-04-road-count",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-lane-kind='riverbed']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-05-riverbed-count-200"
+        },
+        {
+          "config": {
+            "expected": 2,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-05-riverbed-count-2"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-05-riverbed-count",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid='lane-1'][data-lane-kind='grass']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-06-cadence-lane-1-grass-200"
+        },
+        {
+          "config": {
+            "expected": 1,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-06-cadence-lane-1-grass-count-1"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-06-cadence-lane-1-grass",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid='lane-3'][data-lane-kind='riverbed']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-07-cadence-lane-3-riverbed-200"
+        },
+        {
+          "config": {
+            "expected": 1,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-07-cadence-lane-3-riverbed-count-1"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-07-cadence-lane-3-riverbed",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid='lane-3'] [data-obstacle-kind='log']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-08-logs-lane-3-200"
+        },
+        {
+          "config": {
+            "expected": 3,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-08-logs-lane-3-count-3"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-08-logs-lane-3",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "locator": {
+          "strategy": "css",
+          "value": "[data-testid='lane-6'] [data-obstacle-kind='log']"
+        }
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "shape-09-logs-lane-6-200"
+        },
+        {
+          "config": {
+            "expected": 3,
+            "path": "$.count"
+          },
+          "kind": "json_path_eq",
+          "name": "shape-09-logs-lane-6-count-3"
+        }
+      ],
+      "method": "POST",
+      "name": "shape-09-logs-lane-6",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
     },
     {
       "body": {
