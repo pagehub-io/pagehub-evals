@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app. Drives the game through pagehub-browser and asserts the 5-pillar DOM contract: (1) instant restart, (2) shareable score, (3) content-creator-friendly difficulty, (4) zero install friction, (5) payment via ads — plus gameplay-shape asserts: player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa} (frog is explicitly forbidden to keep us legally distant from Frogger), data-current-lane increments on tap, deterministic playthrough. Two deterministic navigations: (A) ?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6 — lanes do not scroll, no obstacles spawn, each tap advances exactly one lane, and game-over fires after 6 successful taps. The ground-truth simulator (in the platform seed file) is trivial under these params: expected data-current-lane after N taps = N. After die-after fires, the grader exercises pillar 2 (share-url contains score=6 and seed=hop-test-001), pillar 5 (interstitial ad slot + dismiss), then pillar 1 (tap on game-root flips state back to playing, score resets to 0). (B) ?seed=hop-test-001&lane-speed=0&lane-density=0.5&deterministic=1 — same deterministic mode but with density>0 so the world spawns its objects. In deterministic mode objects render at xBase positions (no drift, no collisions), letting the grader assert the gameplay SHAPE without timing flakiness: lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed for lane=1,2,3 / 4,5,6 / ...), 3 logs per riverbed (uniformly spaced, guarantees every riverbed is hopable), and obstacle-kind attribution. Finally, the grader visits the share URL with a fresh navigate to assert the shared-score-banner renders. Item count is 46, well under the 50-item collection cap.",
+      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 MOBILE viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, payment via ads) + gameplay shape (player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa}; frog forbidden; data-current-lane increments per tap) + mobile design quality. Three navigations: (A) ?lane-speed=0&lane-density=0&deterministic=1&die-after=6&seed=hop-test-001 — frozen, no spawns, 6 taps -> lane 6 -> game-over; drives pillars 1/2/4/5 + the playing design-audit. (B) ?lane-density=0.5&deterministic=1 — spawns objects frozen at xBase (no drift/collision) so the grader can count the lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed) and the 3-logs-per-riverbed contract. (C) ?score=6 — shared-score banner. Deterministic mode = no rAF, so all asserts are timing-stable. The ground-truth lane simulator lives in the platform seed. Two design-audit requests (via /evaluate) encode a mobile design review: playing -> playfield fills >=80% of viewport height (no dead band), difficulty-active is PRESENT (pillar-3 contract) but VISUALLY HIDDEN in normal play (sr-only; get-text still reads its textContent so the pillar-3 echo still passes), share is a >=44px tap target; game-over -> ad-close is within the viewport (no scroll needed), >=44px, a death-cause element gives non-empty feedback, play-again is >=44px. 48 items, under the 50 cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -16,6 +16,7 @@
         "gshape-initial-score",
         "p3-difficulty-active-echo",
         "p5-ad-slot-banner-exists",
+        "design-audit-playing",
         "tap-1-click",
         "tap-1-lane-check",
         "tap-2-click",
@@ -29,6 +30,7 @@
         "tap-6-click",
         "tap-6-lane-check",
         "tap-6-game-state-game-over",
+        "design-audit-game-over",
         "p2-share-url-contains-score",
         "p2-share-url-contains-seed",
         "p5-ad-slot-interstitial-exists",
@@ -66,7 +68,9 @@
   "requests": [
     {
       "body": {
-        "headless": true
+        "headless": true,
+        "viewport_width": 390,
+        "viewport_height": 844
       },
       "capture": {
         "SID": "$.session_id"
@@ -414,6 +418,51 @@
     },
     {
       "body": {
+        "expression": "(()=>{const v=innerHeight,W=innerWidth,o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');const grB=gr?gr.getBoundingClientRect().bottom:0;o.push('playfield-fills='+(grB>=v*0.8?'ok':'fail'));const d=document.querySelector('[data-testid=\"difficulty-active\"]');o.push('difficulty-present='+(d?'ok':'fail'));let h=false;if(d){const cs=getComputedStyle(d),r=d.getBoundingClientRect();h=cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity)===0||(r.width<=1&&r.height<=1)||r.bottom<=0||r.top>=v||r.right<=0||r.left>=W;}o.push('difficulty-hidden='+(h?'ok':'fail'));const sh=document.querySelector('[data-testid=\"share-url\"]');o.push('share-tap-target='+(sh&&sh.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "design-audit-playing-200"
+        },
+        {
+          "config": {
+            "needle": "playfield-fills=ok"
+          },
+          "kind": "body_contains",
+          "name": "playfield-fills-viewport"
+        },
+        {
+          "config": {
+            "needle": "difficulty-present=ok"
+          },
+          "kind": "body_contains",
+          "name": "difficulty-active-present"
+        },
+        {
+          "config": {
+            "needle": "difficulty-hidden=ok"
+          },
+          "kind": "body_contains",
+          "name": "difficulty-active-visually-hidden-in-normal-play"
+        },
+        {
+          "config": {
+            "needle": "share-tap-target=ok"
+          },
+          "kind": "body_contains",
+          "name": "share-button-min-44px-tap-target"
+        }
+      ],
+      "method": "POST",
+      "name": "design-audit-playing",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate"
+    },
+    {
+      "body": {
         "locator": {
           "strategy": "testid",
           "value": "game-root"
@@ -734,6 +783,58 @@
       "method": "POST",
       "name": "tap-6-game-state-game-over",
       "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-attribute"
+    },
+    {
+      "body": {
+        "expression": "(()=>{const v=innerHeight,o=[];const cl=document.querySelector('[data-testid=\"ad-close\"]');o.push('ad-close-present='+(cl?'ok':'fail'));let iv=false,bg=false;if(cl){const r=cl.getBoundingClientRect();iv=r.top>=0&&r.bottom<=v&&r.left>=0;bg=r.height>=44;}o.push('ad-close-in-viewport='+(iv?'ok':'fail'));o.push('ad-close-tap-target='+(bg?'ok':'fail'));const dc=document.querySelector('[data-testid=\"death-cause\"]');const t=dc?(dc.textContent||'').trim():'';o.push('death-cause='+(t.length>0?'ok':'fail'));const pl=document.querySelector('[data-testid=\"play\"]');o.push('play-tap-target='+(pl&&pl.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "design-audit-game-over-200"
+        },
+        {
+          "config": {
+            "needle": "ad-close-present=ok"
+          },
+          "kind": "body_contains",
+          "name": "ad-close-present"
+        },
+        {
+          "config": {
+            "needle": "ad-close-in-viewport=ok"
+          },
+          "kind": "body_contains",
+          "name": "ad-close-reachable-without-scroll-on-mobile"
+        },
+        {
+          "config": {
+            "needle": "ad-close-tap-target=ok"
+          },
+          "kind": "body_contains",
+          "name": "ad-close-min-44px-tap-target"
+        },
+        {
+          "config": {
+            "needle": "death-cause=ok"
+          },
+          "kind": "body_contains",
+          "name": "death-cause-feedback-present-on-game-over"
+        },
+        {
+          "config": {
+            "needle": "play-tap-target=ok"
+          },
+          "kind": "body_contains",
+          "name": "play-again-min-44px-tap-target"
+        }
+      ],
+      "method": "POST",
+      "name": "design-audit-game-over",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate"
     },
     {
       "body": {
