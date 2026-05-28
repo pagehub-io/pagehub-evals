@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 MOBILE viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, payment via ads) + gameplay shape (player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa}; frog forbidden; data-current-lane increments per tap) + mobile design quality. Three navigations: (A) deterministic, frozen, no spawns, start-x=90, 6 taps -> lane 6 -> game-over; drives pillars 1/2/4/5 + the playing design-audit. (B) deterministic + lane-density=0.9 — spawns objects frozen at xBase (no drift/collision) so the grader counts the lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed) + the 3-logs-per-riverbed contract + vehicle facing. (C) ?score=6 — shared-score banner. Deterministic mode = no rAF, so all asserts are timing-stable. The ground-truth lane simulator lives in the platform seed. Three design-audit /evaluate requests encode the mobile design review + edge-case regressions. playing: playfield fills >=80% of viewport, difficulty-active present (pillar-3) but sr-only hidden in normal play, share >=44px, start-x-honored (nav A's start-x=90 places the player at data-player-x=90). game-over: ad-close in-viewport + >=44px, death-cause non-empty, play-again >=44px, lateral-x-preserved (after 6 hops player is STILL at ~90, not teleported to center — the log-edge teleport regression). vehicle-facing (nav B): every vehicle has data-facing=left|right, both directions on screen, and left vs right vehicles render a visually DISTINCT sprite (so cars don't drive backwards). start-x + start-lane are deterministic-only state-init params. 49 items, under the 50 cap.",
+      "description": "Single-tap hopper-game conformance + shippability battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 mobile viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, ads) + gameplay shape (player species in {kangaroo,rabbit,grasshopper,flea,jerboa}; frog forbidden; data-current-lane increments per tap; lane-kind cadence bank/grass/road/riverbed; 3 logs per riverbed; vehicle facing) + mobile design audits (playfield fills >=80% viewport, >=44px tap targets, interstitial reachable without scroll, death-cause, lateral-x preserved, no teleport). Deterministic mode (?deterministic=1 freezes the rAF loop; ?lane-speed/lane-density/seed/die-after/start-x/start-lane) keeps grading timing-stable. Shippability battery (+26 items) adds: native-readiness (viewport-fit=cover, touch-action, safe-area insets, PWA manifest, privacy-link), daily-seed determinism (?today -> seed=daily-<date>), best-score persistence + so-close delta + score-card (localStorage, survives reload), difficulty ramp (data-effective-speed > base at high start-lane), a deterministic collision tier (?scripted-traffic=hit -> road death, =gap -> splash death), a rewarded-continue resume-at-same-lane path, and a reachable-log fairness invariant. 75 items, under the 90 cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -51,6 +51,32 @@
         "design-audit-vehicle-facing",
         "p2-visit-share-url",
         "p2-shared-score-banner-visible",
+        "native-01-navigate",
+        "native-02-readiness-audit",
+        "ramp-01-navigate",
+        "ramp-02-effective-speed-audit",
+        "daily-01-navigate",
+        "daily-02-seed-derived",
+        "best-01-navigate",
+        "best-02-click",
+        "best-03-click",
+        "best-04-gameover-audit",
+        "best-05-navigate-fresh",
+        "best-06-persist-audit",
+        "collide-01-navigate-hit",
+        "collide-02-hop",
+        "collide-03-hit-audit",
+        "collide-04-navigate-gap",
+        "collide-05-hop",
+        "collide-06-gap-audit",
+        "rewarded-01-navigate",
+        "rewarded-02-click",
+        "rewarded-03-click",
+        "rewarded-04-present-audit",
+        "rewarded-05-click-rewarded",
+        "rewarded-06-resume-audit",
+        "invariant-01-navigate",
+        "invariant-02-reachable-log-audit",
         "lifecycle-99-delete-session"
       ],
       "name": "eval-game-hoppers"
@@ -1406,6 +1432,657 @@
       "method": "DELETE",
       "name": "lifecycle-99-delete-session",
       "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}"
+    },
+    {
+      "name": "native-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-native&deterministic=1&lane-speed=0&lane-density=0",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "native-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "native-02-readiness-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const W=innerWidth;\nconst m=document.querySelector('meta[name=\"viewport\"]');const vc=m?(m.getAttribute('content')||''):'';\no.push('viewport-fit-cover='+(/viewport-fit\\s*=\\s*cover/.test(vc)?'ok':'fail'));\nconst gr=document.querySelector('[data-testid=\"game-root\"]');\nconst ta=gr?getComputedStyle(gr).touchAction:'';const tab=getComputedStyle(document.body).touchAction;\no.push('touch-action='+(/manipulation|none/.test(ta)||/manipulation|none/.test(tab)?'ok':'fail'));\no.push('no-h-scroll='+(document.documentElement.scrollWidth<=W+1?'ok':'fail'));\nlet safe=false;try{safe=[...document.styleSheets].some(ss=>{try{return [...ss.cssRules].some(r=>/safe-area-inset/.test(r.cssText));}catch(e){return false;}});}catch(e){}\no.push('safe-area='+(safe?'ok':'fail'));\no.push('pwa-manifest='+(document.querySelector('link[rel=\"manifest\"]')?'ok':'fail'));\no.push('privacy-link='+(document.querySelector('[data-testid=\"privacy-link\"]')?'ok':'fail'));\nreturn o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "native-02-readiness-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-viewport-fit-cover",
+          "config": {
+            "needle": "viewport-fit-cover=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-touch-action",
+          "config": {
+            "needle": "touch-action=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-no-h-scroll",
+          "config": {
+            "needle": "no-h-scroll=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-safe-area",
+          "config": {
+            "needle": "safe-area=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-pwa-manifest",
+          "config": {
+            "needle": "pwa-manifest=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "native-02-readiness-audit-privacy-link",
+          "config": {
+            "needle": "privacy-link=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ramp-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-ramp&deterministic=1&start-lane=30&lane-speed=1",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "ramp-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "ramp-02-effective-speed-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\nconst raw=gr?gr.getAttribute('data-effective-speed'):null;const v=parseFloat(raw);\no.push('effective-speed-present='+(raw!==null&&Number.isFinite(v)?'ok':'fail'));\no.push('ramp-above-base='+(Number.isFinite(v)&&v>1?'ok':'fail'));\nreturn o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "ramp-02-effective-speed-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "ramp-02-effective-speed-audit-effective-speed-present",
+          "config": {
+            "needle": "effective-speed-present=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "ramp-02-effective-speed-audit-ramp-above-base",
+          "config": {
+            "needle": "ramp-above-base=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "daily-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?today=2026-02-02&deterministic=1&lane-speed=0.5&lane-density=0.25",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "daily-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "daily-02-seed-derived",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/get-text",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "difficulty-active"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "daily-02-seed-derived-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "json_path_eq",
+          "name": "daily-02-seed-derived-eq",
+          "config": {
+            "expected": "lane-speed=0.5|lane-density=0.25|seed=daily-2026-02-02",
+            "path": "$.text"
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-bs&deterministic=1&lane-speed=0&lane-density=0&die-after=2",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-02-click",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-02-click-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-03-click",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-03-click-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-04-gameover-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\no.push('game-over='+((gr&&gr.getAttribute('data-game-state'))==='game-over'?'ok':'fail'));\nconst b=document.querySelector('[data-testid=\"best\"]');const bv=b?parseInt((b.textContent||'').replace(/[^0-9]/g,''),10):NaN;\no.push('best-present='+(b?'ok':'fail'));\no.push('best-updated='+(Number.isFinite(bv)&&bv>=2?'ok':'fail'));\nconst dl=document.querySelector('[data-testid=\"score-delta\"]');\no.push('so-close='+(dl&&(dl.textContent||'').trim().length>0?'ok':'fail'));\no.push('score-card='+(document.querySelector('[data-testid=\"score-card\"]')?'ok':'fail'));\nreturn o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-04-gameover-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-04-gameover-audit-game-over",
+          "config": {
+            "needle": "game-over=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-04-gameover-audit-best-present",
+          "config": {
+            "needle": "best-present=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-04-gameover-audit-best-updated",
+          "config": {
+            "needle": "best-updated=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-04-gameover-audit-so-close",
+          "config": {
+            "needle": "so-close=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-04-gameover-audit-score-card",
+          "config": {
+            "needle": "score-card=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-05-navigate-fresh",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-bs2&deterministic=1&lane-speed=0&lane-density=0",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-05-navigate-fresh-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "best-06-persist-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const b=document.querySelector('[data-testid=\"best\"]');\nconst bv=b?parseInt((b.textContent||'').replace(/[^0-9]/g,''),10):NaN;\no.push('best-persisted='+(Number.isFinite(bv)&&bv>=2?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "best-06-persist-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "best-06-persist-audit-best-persisted",
+          "config": {
+            "needle": "best-persisted=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-01-navigate-hit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-hit&deterministic=1&scripted-traffic=hit",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-01-navigate-hit-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-02-hop",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-02-hop-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-03-hit-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\no.push('collide-hit='+((gr&&gr.getAttribute('data-game-state'))==='game-over'?'ok':'fail'));\nconst dc=document.querySelector('[data-testid=\"death-cause\"]');const t=dc?(dc.textContent||'').trim():'';\no.push('road-cause='+(/squash|road|train|jeep|vehicle|hit|car/i.test(t)?'ok':'fail'));\nreturn o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-03-hit-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "collide-03-hit-audit-collide-hit",
+          "config": {
+            "needle": "collide-hit=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "collide-03-hit-audit-road-cause",
+          "config": {
+            "needle": "road-cause=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-04-navigate-gap",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-gap&deterministic=1&scripted-traffic=gap",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-04-navigate-gap-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-05-hop",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-05-hop-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "collide-06-gap-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\no.push('collide-gap='+((gr&&gr.getAttribute('data-game-state'))==='game-over'?'ok':'fail'));\nconst dc=document.querySelector('[data-testid=\"death-cause\"]');const t=dc?(dc.textContent||'').trim():'';\no.push('gap-cause='+(/splash|drown|water|sank|sink|miss|log|fell/i.test(t)?'ok':'fail'));\nreturn o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "collide-06-gap-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "collide-06-gap-audit-collide-gap",
+          "config": {
+            "needle": "collide-gap=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "collide-06-gap-audit-gap-cause",
+          "config": {
+            "needle": "gap-cause=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-rc&deterministic=1&lane-speed=0&lane-density=0&die-after=2",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-02-click",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-02-click-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-03-click",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-03-click-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-04-present-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const r=document.querySelector('[data-testid=\"rewarded-continue\"]');\no.push('rewarded-present='+(r?'ok':'fail'));\no.push('rewarded-tap-target='+(r&&r.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-04-present-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "rewarded-04-present-audit-rewarded-present",
+          "config": {
+            "needle": "rewarded-present=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "rewarded-04-present-audit-rewarded-tap-target",
+          "config": {
+            "needle": "rewarded-tap-target=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-05-click-rewarded",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "rewarded-continue"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-05-click-rewarded-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "rewarded-06-resume-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\no.push('resumed='+((gr&&gr.getAttribute('data-game-state'))==='playing'?'ok':'fail'));\nconst p=document.querySelector('[data-testid=\"player\"]');const ln=p?parseInt(p.getAttribute('data-current-lane'),10):NaN;\no.push('lane-preserved='+(ln===2?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "rewarded-06-resume-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "rewarded-06-resume-audit-resumed",
+          "config": {
+            "needle": "resumed=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "rewarded-06-resume-audit-lane-preserved",
+          "config": {
+            "needle": "lane-preserved=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "invariant-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-inv&deterministic=1&lane-speed=0&lane-density=0.9",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "invariant-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "invariant-02-reachable-log-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const o=[];const beds=[...document.querySelectorAll('[data-lane-kind=\"riverbed\"]')];\no.push('riverbeds-present='+(beds.length>0?'ok':'fail'));\nconst ok=beds.length>0&&beds.every(bed=>{const logs=[...bed.querySelectorAll('[data-obstacle-kind=\"log\"]')];\nreturn logs.some(l=>{const x=parseFloat(l.style.left);return Number.isFinite(x)&&Math.abs(x-50)<=32;});});\no.push('every-riverbed-reachable='+(ok?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "invariant-02-reachable-log-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "invariant-02-reachable-log-audit-riverbeds-present",
+          "config": {
+            "needle": "riverbeds-present=ok"
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "invariant-02-reachable-log-audit-every-riverbed-reachable",
+          "config": {
+            "needle": "every-riverbed-reachable=ok"
+          }
+        }
+      ]
     }
   ],
   "version": 1
