@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 MOBILE viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, payment via ads) + gameplay shape (player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa}; frog forbidden; data-current-lane increments per tap) + mobile design quality. Three navigations: (A) ?lane-speed=0&lane-density=0&deterministic=1&die-after=6&seed=hop-test-001 — frozen, no spawns, 6 taps -> lane 6 -> game-over; drives pillars 1/2/4/5 + the playing design-audit. (B) ?lane-density=0.5&deterministic=1 — spawns objects frozen at xBase (no drift/collision) so the grader can count the lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed) and the 3-logs-per-riverbed contract. (C) ?score=6 — shared-score banner. Deterministic mode = no rAF, so all asserts are timing-stable. The ground-truth lane simulator lives in the platform seed. Two design-audit requests (via /evaluate) encode a mobile design review: playing -> playfield fills >=80% of viewport height (no dead band), difficulty-active is PRESENT (pillar-3 contract) but VISUALLY HIDDEN in normal play (sr-only; get-text still reads its textContent so the pillar-3 echo still passes), share is a >=44px tap target; game-over -> ad-close is within the viewport (no scroll needed), >=44px, a death-cause element gives non-empty feedback, play-again is >=44px. 48 items, under the 50 cap.",
+      "description": "Single-tap hopper-game conformance battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 MOBILE viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, payment via ads) + gameplay shape (player species ∈ {kangaroo, rabbit, grasshopper, flea, jerboa}; frog forbidden; data-current-lane increments per tap) + mobile design quality. Three navigations: (A) deterministic, frozen, no spawns, start-x=90, 6 taps -> lane 6 -> game-over; drives pillars 1/2/4/5 + the playing design-audit. (B) deterministic + lane-density=0.9 — spawns objects frozen at xBase (no drift/collision) so the grader counts the lane-kind cadence (bank for lane<=0; then repeating grass/road/riverbed) + the 3-logs-per-riverbed contract + vehicle facing. (C) ?score=6 — shared-score banner. Deterministic mode = no rAF, so all asserts are timing-stable. The ground-truth lane simulator lives in the platform seed. Three design-audit /evaluate requests encode the mobile design review + edge-case regressions. playing: playfield fills >=80% of viewport, difficulty-active present (pillar-3) but sr-only hidden in normal play, share >=44px, start-x-honored (nav A's start-x=90 places the player at data-player-x=90). game-over: ad-close in-viewport + >=44px, death-cause non-empty, play-again >=44px, lateral-x-preserved (after 6 hops player is STILL at ~90, not teleported to center — the log-edge teleport regression). vehicle-facing (nav B): every vehicle has data-facing=left|right, both directions on screen, and left vs right vehicles render a visually DISTINCT sprite (so cars don't drive backwards). start-x + start-lane are deterministic-only state-init params. 49 items, under the 50 cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -48,6 +48,7 @@
         "shape-07-cadence-lane-3-riverbed",
         "shape-08-logs-lane-3",
         "shape-09-logs-lane-6",
+        "design-audit-vehicle-facing",
         "p2-visit-share-url",
         "p2-shared-score-banner-visible",
         "lifecycle-99-delete-session"
@@ -90,7 +91,7 @@
     },
     {
       "body": {
-        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6",
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0&deterministic=1&die-after=6&start-x=90",
         "wait_until": "networkidle"
       },
       "evaluations": [
@@ -418,7 +419,7 @@
     },
     {
       "body": {
-        "expression": "(()=>{const v=innerHeight,W=innerWidth,o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');const grB=gr?gr.getBoundingClientRect().bottom:0;o.push('playfield-fills='+(grB>=v*0.8?'ok':'fail'));const d=document.querySelector('[data-testid=\"difficulty-active\"]');o.push('difficulty-present='+(d?'ok':'fail'));let h=false;if(d){const cs=getComputedStyle(d),r=d.getBoundingClientRect();h=cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity)===0||(r.width<=1&&r.height<=1)||r.bottom<=0||r.top>=v||r.right<=0||r.left>=W;}o.push('difficulty-hidden='+(h?'ok':'fail'));const sh=document.querySelector('[data-testid=\"share-url\"]');o.push('share-tap-target='+(sh&&sh.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
+        "expression": "(()=>{const v=innerHeight,W=innerWidth,o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');const grB=gr?gr.getBoundingClientRect().bottom:0;o.push('playfield-fills='+(grB>=v*0.8?'ok':'fail'));const d=document.querySelector('[data-testid=\"difficulty-active\"]');o.push('difficulty-present='+(d?'ok':'fail'));let h=false;if(d){const cs=getComputedStyle(d),r=d.getBoundingClientRect();h=cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity)===0||(r.width<=1&&r.height<=1)||r.bottom<=0||r.top>=v||r.right<=0||r.left>=W;}o.push('difficulty-hidden='+(h?'ok':'fail'));const sh=document.querySelector('[data-testid=\"share-url\"]');o.push('share-tap-target='+(sh&&sh.getBoundingClientRect().height>=44?'ok':'fail'));const p=document.querySelector('[data-testid=\"player\"]');const px=p?parseFloat(p.getAttribute('data-player-x')):NaN;o.push('start-x-honored='+(Math.abs(px-90)<=3?'ok':'fail'));return o.join('|');})()"
       },
       "evaluations": [
         {
@@ -455,6 +456,13 @@
           },
           "kind": "body_contains",
           "name": "share-button-min-44px-tap-target"
+        },
+        {
+          "config": {
+            "needle": "start-x-honored=ok"
+          },
+          "kind": "body_contains",
+          "name": "deterministic-start-x-init-honored"
         }
       ],
       "method": "POST",
@@ -786,7 +794,7 @@
     },
     {
       "body": {
-        "expression": "(()=>{const v=innerHeight,o=[];const cl=document.querySelector('[data-testid=\"ad-close\"]');o.push('ad-close-present='+(cl?'ok':'fail'));let iv=false,bg=false;if(cl){const r=cl.getBoundingClientRect();iv=r.top>=0&&r.bottom<=v&&r.left>=0;bg=r.height>=44;}o.push('ad-close-in-viewport='+(iv?'ok':'fail'));o.push('ad-close-tap-target='+(bg?'ok':'fail'));const dc=document.querySelector('[data-testid=\"death-cause\"]');const t=dc?(dc.textContent||'').trim():'';o.push('death-cause='+(t.length>0?'ok':'fail'));const pl=document.querySelector('[data-testid=\"play\"]');o.push('play-tap-target='+(pl&&pl.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
+        "expression": "(()=>{const v=innerHeight,o=[];const cl=document.querySelector('[data-testid=\"ad-close\"]');o.push('ad-close-present='+(cl?'ok':'fail'));let iv=false,bg=false;if(cl){const r=cl.getBoundingClientRect();iv=r.top>=0&&r.bottom<=v&&r.left>=0;bg=r.height>=44;}o.push('ad-close-in-viewport='+(iv?'ok':'fail'));o.push('ad-close-tap-target='+(bg?'ok':'fail'));const dc=document.querySelector('[data-testid=\"death-cause\"]');const t=dc?(dc.textContent||'').trim():'';o.push('death-cause='+(t.length>0?'ok':'fail'));const pl=document.querySelector('[data-testid=\"play\"]');o.push('play-tap-target='+(pl&&pl.getBoundingClientRect().height>=44?'ok':'fail'));const p=document.querySelector('[data-testid=\"player\"]');const px=p?parseFloat(p.getAttribute('data-player-x')):NaN;o.push('lateral-x-preserved='+(Math.abs(px-90)<=3?'ok':'fail'));return o.join('|');})()"
       },
       "evaluations": [
         {
@@ -830,6 +838,13 @@
           },
           "kind": "body_contains",
           "name": "play-again-min-44px-tap-target"
+        },
+        {
+          "config": {
+            "needle": "lateral-x-preserved=ok"
+          },
+          "kind": "body_contains",
+          "name": "lateral-x-preserved-across-hops-no-teleport"
         }
       ],
       "method": "POST",
@@ -1048,7 +1063,7 @@
     },
     {
       "body": {
-        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0.5&deterministic=1",
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=0&lane-density=0.9&deterministic=1",
         "wait_until": "networkidle"
       },
       "evaluations": [
@@ -1287,6 +1302,51 @@
       "method": "POST",
       "name": "shape-09-logs-lane-6",
       "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/find"
+    },
+    {
+      "body": {
+        "expression": "(()=>{const o=[];const vs=Array.from(document.querySelectorAll('[data-obstacle-kind=\"vehicle\"]'));o.push('vehicles-present='+(vs.length>0?'ok':'fail'));const faced=vs.length>0&&vs.every(e=>{const f=e.getAttribute('data-facing');return f==='left'||f==='right';});o.push('facing-attr-present='+(faced?'ok':'fail'));const L=vs.filter(e=>e.getAttribute('data-facing')==='left');const R=vs.filter(e=>e.getAttribute('data-facing')==='right');o.push('facing-both-present='+(L.length>0&&R.length>0?'ok':'fail'));const sig=e=>getComputedStyle(e).transform+'|'+(e.textContent||'').trim();const ls=new Set(L.map(sig));const rs=new Set(R.map(sig));let disjoint=L.length>0&&R.length>0;for(const s of ls){if(rs.has(s)){disjoint=false;break;}}o.push('facing-visual-distinct='+(disjoint?'ok':'fail'));return o.join('|');})()"
+      },
+      "evaluations": [
+        {
+          "config": {
+            "expected": 200
+          },
+          "kind": "status_eq",
+          "name": "design-audit-vehicle-facing-200"
+        },
+        {
+          "config": {
+            "needle": "vehicles-present=ok"
+          },
+          "kind": "body_contains",
+          "name": "road-lanes-spawn-vehicles"
+        },
+        {
+          "config": {
+            "needle": "facing-attr-present=ok"
+          },
+          "kind": "body_contains",
+          "name": "vehicles-carry-data-facing-left-or-right"
+        },
+        {
+          "config": {
+            "needle": "facing-both-present=ok"
+          },
+          "kind": "body_contains",
+          "name": "both-drift-directions-on-screen"
+        },
+        {
+          "config": {
+            "needle": "facing-visual-distinct=ok"
+          },
+          "kind": "body_contains",
+          "name": "vehicle-sprite-differs-by-direction"
+        }
+      ],
+      "method": "POST",
+      "name": "design-audit-vehicle-facing",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate"
     },
     {
       "body": {
