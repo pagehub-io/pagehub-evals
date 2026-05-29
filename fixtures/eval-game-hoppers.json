@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance + shippability battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 mobile viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, ads) + gameplay shape (player species in {kangaroo,rabbit,grasshopper,flea,jerboa}; frog forbidden; data-current-lane increments per tap; lane-kind cadence bank/grass/road/riverbed; 3 logs per riverbed; vehicle facing) + mobile design audits (playfield fills >=80% viewport, >=44px tap targets, interstitial reachable without scroll, death-cause, lateral-x preserved, no teleport). Deterministic mode (?deterministic=1 freezes the rAF loop; ?lane-speed/lane-density/seed/die-after/start-x/start-lane) keeps grading timing-stable. Shippability battery (+26 items) adds: native-readiness (viewport-fit=cover, touch-action, safe-area insets, PWA manifest, privacy-link), daily-seed determinism (?today -> seed=daily-<date>), best-score persistence + so-close delta + score-card (localStorage, survives reload), difficulty ramp (data-effective-speed > base at high start-lane), a deterministic collision tier (?scripted-traffic=hit -> road death, =gap -> splash death), a rewarded-continue resume-at-same-lane path, and a reachable-log fairness invariant. 75 items, under the 90 cap.",
+      "description": "Single-tap hopper-game conformance + shippability battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 mobile viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, ads) + gameplay shape (player species in {kangaroo,rabbit,grasshopper,flea,jerboa}; frog forbidden; data-current-lane increments per tap; lane-kind cadence bank/grass/road/riverbed; 3 logs per riverbed; vehicle facing) + mobile design audits (playfield fills >=80% viewport, >=44px tap targets, interstitial reachable without scroll, death-cause, lateral-x preserved, no teleport). Deterministic mode (?deterministic=1 freezes the rAF loop; ?lane-speed/lane-density/seed/die-after/start-x/start-lane) keeps grading timing-stable. Shippability battery (+26 items) adds: native-readiness (viewport-fit=cover, touch-action, safe-area insets, PWA manifest, privacy-link), daily-seed determinism (?today -> seed=daily-<date>), best-score persistence + so-close delta + score-card (localStorage, survives reload), difficulty ramp (data-effective-speed > base at high start-lane), a deterministic collision tier (?scripted-traffic=hit -> road death, =gap -> splash death), a rewarded-continue resume-at-same-lane path, and a reachable-log fairness invariant. Move-consistency (+4 items): a deterministic animation clock-pin (?clock=<ms> freezes the world at that animation-time, positions a pure function of seed/lane/clock; clock=0 = xBase) lets the grader verify a hop does NOT teleport the board — with the clock pinned, every obstacle in a still-visible lane (tracked by stable data-lane-index + data-obstacle-id, with data-x-base the clock=0 origin) holds its exact position across a hop. Requires drift to derive from a monotonic clock, not an epoch that resets on render/hop. 79 items, under the 90 cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -77,6 +77,10 @@
         "rewarded-06-resume-audit",
         "invariant-01-navigate",
         "invariant-02-reachable-log-audit",
+        "moveconsist-01-navigate",
+        "moveconsist-02-snapshot-before",
+        "moveconsist-03-hop",
+        "moveconsist-04-hop-stable-audit",
         "lifecycle-99-delete-session"
       ],
       "name": "eval-game-hoppers"
@@ -2080,6 +2084,95 @@
           "name": "invariant-02-reachable-log-audit-every-riverbed-reachable",
           "config": {
             "needle": "every-riverbed-reachable=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "moveconsist-01-navigate",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
+      "body": {
+        "url": "{{eval-game-hoppers_url}}/?seed=hop-test-001&lane-speed=1&lane-density=0.9&deterministic=1&clock=3000",
+        "wait_until": "networkidle"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "moveconsist-01-navigate-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "moveconsist-02-snapshot-before",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const lane=document.querySelector('[data-lane-index=\"2\"]');if(!lane)return 'drift=fail|sig=MISSING';const obs=[...lane.querySelectorAll('[data-obstacle-id]')];if(obs.length===0)return 'drift=fail|sig=EMPTY';let d=false;const p=obs.map(o=>{const id=o.getAttribute('data-obstacle-id');const left=Math.round(parseFloat(o.style.left||'0'));const xb=parseFloat(o.getAttribute('data-x-base'));if(Number.isFinite(xb)&&Math.abs(left-xb)>1)d=true;return id+':'+left;});p.sort();return 'drift='+(d?'ok':'fail')+'|sig='+p.join(',');})()"
+      },
+      "capture": {
+        "LANE2_BEFORE": "$.text"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "moveconsist-02-snapshot-before-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "clock-pin-honored-world-advanced",
+          "config": {
+            "needle": "drift=ok"
+          }
+        }
+      ]
+    },
+    {
+      "name": "moveconsist-03-hop",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
+      "body": {
+        "locator": {
+          "strategy": "testid",
+          "value": "game-root"
+        }
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "moveconsist-03-hop-200",
+          "config": {
+            "expected": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "moveconsist-04-hop-stable-audit",
+      "method": "POST",
+      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
+      "body": {
+        "expression": "(()=>{const B=\"{{LANE2_BEFORE}}\";const bsig=(B.split('sig=')[1]||'');const lane=document.querySelector('[data-lane-index=\"2\"]');if(!lane)return 'hop-stable=fail|reason=no-lane';const obs=[...lane.querySelectorAll('[data-obstacle-id]')];if(obs.length===0)return 'hop-stable=fail|reason=empty';const p=obs.map(o=>o.getAttribute('data-obstacle-id')+':'+Math.round(parseFloat(o.style.left||'0')));p.sort();const asig=p.join(',');return 'hop-stable='+(asig===bsig?'ok':'fail')+'|after='+asig;})()"
+      },
+      "evaluations": [
+        {
+          "kind": "status_eq",
+          "name": "moveconsist-04-hop-stable-audit-200",
+          "config": {
+            "expected": 200
+          }
+        },
+        {
+          "kind": "body_contains",
+          "name": "obstacles-stable-across-hop-no-teleport",
+          "config": {
+            "needle": "hop-stable=ok"
           }
         }
       ]
