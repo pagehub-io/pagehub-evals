@@ -7,5 +7,6 @@ shared cap without picking up a transitive dependency on the route layer.
 
 # Hard cap on items in a collection the run engine will execute. Fixture
 # bundles reuse this so an imported collection can't exceed what a run
-# would refuse to run.
-COLLECTION_ITEM_CAP = 50
+# would refuse to run. Bumped 50 -> 90 for the eval-game-hoppers
+# shippability battery (native/virality/monetization/collision tiers).
+COLLECTION_ITEM_CAP = 90
