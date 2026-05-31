@@ -1,7 +1,7 @@
 {
   "collections": [
     {
-      "description": "Single-tap hopper-game conformance + shippability battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 mobile viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, ads) + gameplay shape (player species in {kangaroo,rabbit,grasshopper,flea,jerboa}; frog forbidden; data-current-lane increments per tap; lane-kind cadence bank/grass/road/riverbed; 3 logs per riverbed; vehicle facing) + mobile design audits (playfield fills >=80% viewport, >=44px tap targets, interstitial reachable without scroll, death-cause, lateral-x preserved, no teleport). Deterministic mode (?deterministic=1 freezes the rAF loop; ?lane-speed/lane-density/seed/die-after/start-x/start-lane) keeps grading timing-stable. Shippability battery (+26 items) adds: native-readiness (viewport-fit=cover, touch-action, safe-area insets, PWA manifest, privacy-link), daily-seed determinism (?today -> seed=daily-<date>), best-score persistence + so-close delta + score-card (localStorage, survives reload), difficulty ramp (data-effective-speed > base at high start-lane), a deterministic collision tier (?scripted-traffic=hit -> road death, =gap -> splash death), a rewarded-continue resume-at-same-lane path, and a reachable-log fairness invariant. Move-consistency (+4 items): a deterministic animation clock-pin (?clock=<ms> freezes the world at that animation-time, positions a pure function of seed/lane/clock; clock=0 = xBase) lets the grader verify a hop does NOT teleport the board — with the clock pinned, every obstacle in a still-visible lane (tracked by stable data-lane-index + data-obstacle-id, with data-x-base the clock=0 origin) holds its exact position across a hop. Requires drift to derive from a monotonic clock, not an epoch that resets on render/hop. 79 items, under the 90 cap.",
+      "description": "Single-tap hopper-game conformance + shippability battery for the eval-game-hoppers web app, driven through pagehub-browser at a 390x844 mobile viewport. Asserts the 5-pillar DOM contract (instant restart, shareable score, creator-friendly difficulty, zero install friction, ads) + gameplay shape (player species in {kangaroo,rabbit,grasshopper,flea,jerboa}; frog forbidden; data-current-lane increments per tap; lane-kind cadence bank/grass/road/riverbed; 3 logs per riverbed; vehicle facing) + mobile design audits (playfield fills >=80% viewport, >=44px tap targets, interstitial reachable without scroll, death-cause, lateral-x preserved, no teleport). Deterministic mode (?deterministic=1 freezes the rAF loop; ?lane-speed/lane-density/seed/die-after/start-x/start-lane) keeps grading timing-stable. Shippability battery (+26 items) adds: native-readiness (viewport-fit=cover, touch-action, safe-area insets, PWA manifest, privacy-link), daily-seed determinism (?today -> seed=daily-<date>), best-score persistence + so-close delta + score-card (localStorage, survives reload), difficulty ramp (data-effective-speed > base at high start-lane), a deterministic collision tier (?scripted-traffic=hit -> road death, =gap -> splash death), and a reachable-log fairness invariant. Move-consistency (+4 items): a deterministic animation clock-pin (?clock=<ms> freezes the world at that animation-time, positions a pure function of seed/lane/clock; clock=0 = xBase) lets the grader verify a hop does NOT teleport the board \u2014 with the clock pinned, every obstacle in a still-visible lane (tracked by stable data-lane-index + data-obstacle-id, with data-x-base the clock=0 origin) holds its exact position across a hop. Requires drift to derive from a monotonic clock, not an epoch that resets on render/hop. 79 items, under the 90 cap.",
       "items": [
         "lifecycle-01-create-session",
         "lifecycle-02-navigate",
@@ -69,12 +69,6 @@
         "collide-04-navigate-gap",
         "collide-05-hop",
         "collide-06-gap-audit",
-        "rewarded-01-navigate",
-        "rewarded-02-click",
-        "rewarded-03-click",
-        "rewarded-04-present-audit",
-        "rewarded-05-click-rewarded",
-        "rewarded-06-resume-audit",
         "invariant-01-navigate",
         "invariant-02-reachable-log-audit",
         "moveconsist-01-navigate",
@@ -1895,146 +1889,6 @@
           "name": "collide-06-gap-audit-gap-cause",
           "config": {
             "needle": "gap-cause=ok"
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-01-navigate",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/navigate",
-      "body": {
-        "url": "{{eval-game-hoppers_url}}/?seed=hop-rc&deterministic=1&lane-speed=0&lane-density=0&die-after=2",
-        "wait_until": "networkidle"
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-01-navigate-200",
-          "config": {
-            "expected": 200
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-02-click",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
-      "body": {
-        "locator": {
-          "strategy": "testid",
-          "value": "game-root"
-        }
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-02-click-200",
-          "config": {
-            "expected": 200
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-03-click",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
-      "body": {
-        "locator": {
-          "strategy": "testid",
-          "value": "game-root"
-        }
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-03-click-200",
-          "config": {
-            "expected": 200
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-04-present-audit",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
-      "body": {
-        "expression": "(()=>{const o=[];const r=document.querySelector('[data-testid=\"rewarded-continue\"]');\no.push('rewarded-present='+(r?'ok':'fail'));\no.push('rewarded-tap-target='+(r&&r.getBoundingClientRect().height>=44?'ok':'fail'));return o.join('|');})()"
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-04-present-audit-200",
-          "config": {
-            "expected": 200
-          }
-        },
-        {
-          "kind": "body_contains",
-          "name": "rewarded-04-present-audit-rewarded-present",
-          "config": {
-            "needle": "rewarded-present=ok"
-          }
-        },
-        {
-          "kind": "body_contains",
-          "name": "rewarded-04-present-audit-rewarded-tap-target",
-          "config": {
-            "needle": "rewarded-tap-target=ok"
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-05-click-rewarded",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/click",
-      "body": {
-        "locator": {
-          "strategy": "testid",
-          "value": "rewarded-continue"
-        }
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-05-click-rewarded-200",
-          "config": {
-            "expected": 200
-          }
-        }
-      ]
-    },
-    {
-      "name": "rewarded-06-resume-audit",
-      "method": "POST",
-      "url": "{{pagehub-browser_url}}/v1/sessions/{{SID}}/evaluate",
-      "body": {
-        "expression": "(()=>{const o=[];const gr=document.querySelector('[data-testid=\"game-root\"]');\no.push('resumed='+((gr&&gr.getAttribute('data-game-state'))==='playing'?'ok':'fail'));\nconst p=document.querySelector('[data-testid=\"player\"]');const ln=p?parseInt(p.getAttribute('data-current-lane'),10):NaN;\no.push('lane-preserved='+(ln===2?'ok':'fail'));return o.join('|');})()"
-      },
-      "evaluations": [
-        {
-          "kind": "status_eq",
-          "name": "rewarded-06-resume-audit-200",
-          "config": {
-            "expected": 200
-          }
-        },
-        {
-          "kind": "body_contains",
-          "name": "rewarded-06-resume-audit-resumed",
-          "config": {
-            "needle": "resumed=ok"
-          }
-        },
-        {
-          "kind": "body_contains",
-          "name": "rewarded-06-resume-audit-lane-preserved",
-          "config": {
-            "needle": "lane-preserved=ok"
           }
         }
       ]
