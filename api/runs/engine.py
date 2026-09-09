@@ -215,8 +215,11 @@ def _eval_body_contains(_status, body, _headers, config: dict) -> tuple[bool, di
         rendered = body
     else:
         rendered = json.dumps(body) if body is not None else ""
-    contains = needle in rendered
+    # A needle that rendered to "" would match vacuously; treat it as failed.
+    contains = bool(needle) and needle in rendered
     detail: dict[str, Any] = {"needle": needle, "present": contains}
+    if not needle:
+        detail["empty_needle"] = True
     if "needle_raw" in config:
         detail["needle_raw"] = config["needle_raw"]
     return contains, detail
@@ -281,6 +284,9 @@ def _eval_json_path_contains(_status, body, _headers, config: dict) -> tuple[boo
         return False, detail
     detail["observed_type"] = _json_type_name(observed)
     if not isinstance(observed, str):
+        return False, detail
+    if not needle:
+        detail["empty_needle"] = True
         return False, detail
     detail["found"] = needle in observed
     # Bounded by the caller's redact-then-bound pass.
@@ -400,7 +406,6 @@ async def _execute_request(
 ) -> tuple[dict[str, Any], Any, bool, bool]:
     """Fire one request, evaluate, return ``(raw_result_dict, raw_response_body, transient, fired)``.
 
-    Returns ``(raw_result_dict, raw_response_body, transient, fired)``.
     ``raw_result_dict`` is shaped like ``RunRequestResult`` but is NOT yet
     redacted or bounded: the caller runs one redact-then-bound pass over
     it (excerpt, error string, evaluation details) before persistence.

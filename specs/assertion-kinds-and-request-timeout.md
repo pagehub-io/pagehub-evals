@@ -357,6 +357,16 @@ describes what the build supports; a consumer still handles the runs gate
 
 ### What does not change
 
+One read-path hazard, stated: `build_export` re-validates stored captures
+through `FixtureRequest`, so a capture stored under the old `^\$`-only rule
+that the new grammar rejects (`$`, `$.a[]`, `$['a']`, or one named
+`RUN_ID`) would make `GET /v1/collections/{id}/export` a 500 for that
+collection after deploy. Verified before merge: staging has zero request
+rows with a non-empty capture and preprod has no `requests` table, so no
+live data is affected. A needle that renders to the empty string is
+treated as failed (`empty_needle: true`), not as a vacuous match.
+
+
 Existing kinds' configs and verdicts (the redaction walk changes what is
 persisted for a secret, not any verdict). The DB `kind` column is `TEXT`.
 The four checked-in bundles keep their guaranteed invariant, which
