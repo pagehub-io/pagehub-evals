@@ -64,9 +64,6 @@ _TRANSIENT_BASE_DELAY_MS = 250
 # ``{{BASE_URL}}`` (no scheme) and a header the sanitiser let through but
 # h11 refuses.
 _NON_TRANSIENT_TRANSPORT_ERRORS = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
-_TIMEOUT_ERROR_NAMES = frozenset(
-    {"ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutError"}
-)
 _FILTER_RE = re.compile(r"\[\?\(@\.([^.\[\]=\s]+)==(?:'([^']*)'|\"([^\"]*)\")\)\]")
 _SUBSTITUTION_TOKEN_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
@@ -196,14 +193,14 @@ def _eval_json_path_eq(_status, body, _headers, config: dict) -> tuple[bool, dic
     path = config["path"]
     expected = config["expected"]
     observed = _resolve_path(body, path)
+    detail: dict[str, Any] = {"path": path, "expected": expected}
+    if "expected_raw" in config:
+        detail["expected_raw"] = config["expected_raw"]
     if observed is _MISSING:
-        return False, {
-            "path": path,
-            "expected": expected,
-            "observed": None,
-            "missing": True,
-        }
-    return observed == expected, {"path": path, "expected": expected, "observed": observed}
+        detail.update({"observed": None, "missing": True})
+        return False, detail
+    detail["observed"] = observed
+    return observed == expected, detail
 
 
 def _eval_header_present(_status, _body, headers: dict, config: dict) -> tuple[bool, dict]:
@@ -219,7 +216,10 @@ def _eval_body_contains(_status, body, _headers, config: dict) -> tuple[bool, di
     else:
         rendered = json.dumps(body) if body is not None else ""
     contains = needle in rendered
-    return contains, {"needle": needle, "present": contains}
+    detail: dict[str, Any] = {"needle": needle, "present": contains}
+    if "needle_raw" in config:
+        detail["needle_raw"] = config["needle_raw"]
+    return contains, detail
 
 
 def _json_type_name(value: Any) -> str:
@@ -227,7 +227,7 @@ def _json_type_name(value: Any) -> str:
         return "null"
     if isinstance(value, bool):
         return "boolean"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return "number"
     if isinstance(value, str):
         return "string"
@@ -239,7 +239,7 @@ def _json_type_name(value: Any) -> str:
 
 
 def _is_json_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _eval_json_path_exists(_status, body, _headers, config: dict) -> tuple[bool, dict]:
@@ -398,7 +398,7 @@ async def _execute_request(
     timeout_s: float = _OUTBOUND_TIMEOUT_SECONDS,
     timeout_ms: int | None = None,
 ) -> tuple[dict[str, Any], Any, bool, bool]:
-    """Fire one request, evaluate, return ``(raw_result_dict, raw_response_body)``.
+    """Fire one request, evaluate, return ``(raw_result_dict, raw_response_body, transient, fired)``.
 
     Returns ``(raw_result_dict, raw_response_body, transient, fired)``.
     ``raw_result_dict`` is shaped like ``RunRequestResult`` but is NOT yet
@@ -439,6 +439,7 @@ async def _execute_request(
     transport_error: str | None = None
     transient = False
     fired = False
+    is_timeout = False
     started = time.monotonic()
 
     blocked, reason = is_blocked_host(rendered_url, env_name)
@@ -486,12 +487,14 @@ async def _execute_request(
             # trips httpx's per-chunk read timeout.
             transport_error = "TimeoutError: attempt ceiling"
             transient = True
+            is_timeout = True
         except _NON_TRANSIENT_TRANSPORT_ERRORS as e:
             transport_error = f"{type(e).__name__}: {e}"
         except httpx.TransportError as e:
             # All four timeout classes, network, protocol and proxy errors.
-            transport_error = f"{type(e).__name__}: {e}"
+            transport_error = f"{type(e).__name__}: {e}".rstrip(": ")
             transient = True
+            is_timeout = isinstance(e, httpx.TimeoutException)
         except Exception as e:  # noqa: BLE001
             transport_error = f"{type(e).__name__}: {e}"
 
@@ -543,10 +546,8 @@ async def _execute_request(
 
     # Excerpt and error string are bounded by the caller AFTER redaction.
     body_excerpt = response_body
-    is_timeout = transport_error is not None and (
-        transport_error.split(":", 1)[0] in _TIMEOUT_ERROR_NAMES
-    )
-    error_suffix = f" (timeout_ms={timeout_ms})" if (is_timeout and timeout_ms) else ""
+    effective_timeout_ms = timeout_ms if timeout_ms else int(timeout_s * 1000)
+    error_suffix = f" (timeout_ms={effective_timeout_ms})" if is_timeout else ""
     result: dict[str, Any] = {
         "request_id": str(request_row["id"]),
         "request_name": request_row["name"],
@@ -807,7 +808,7 @@ async def execute_run(run_id: UUID) -> None:
                     for ev in ev_rows
                 ]
 
-                # _execute_request returns (raw_dict, raw_body). The
+                # _execute_request returns (raw_dict, raw_body, transient, fired). The
                 # raw_body feeds captures; the raw_dict is then
                 # redacted in place; THEN we compute `captured` keys
                 # and `passed`; THEN model_validate.

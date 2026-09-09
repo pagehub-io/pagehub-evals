@@ -46,7 +46,7 @@ def _row_to_response(row) -> RequestResponse:
         headers=headers,
         body=body,
         capture=capture_raw,
-        timeout_ms=row["timeout_ms"] if "timeout_ms" in row.keys() else None,
+        timeout_ms=row["timeout_ms"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

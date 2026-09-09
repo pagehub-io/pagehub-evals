@@ -155,7 +155,7 @@ async def test_four_timeouts_exhaust_attempts_with_suffix() -> None:
     ev = _evidence(conn)
     r = ev["evidence"]["requests"][0]
     assert ev["status"] == "error" and r["attempts"] == 4
-    assert r["transport_error"].startswith("ReadTimeout") and r["transport_error"].endswith("(timeout_ms=1500)")
+    assert r["transport_error"] == "ReadTimeout: slow (timeout_ms=1500)"
     assert len(script.calls) == 4
 
 
@@ -182,6 +182,32 @@ async def test_unrendered_base_url_is_not_retried() -> None:
     r = _evidence(conn)["evidence"]["requests"][0]
     assert r["attempts"] == 1 and r["transport_error"].startswith("UnsupportedProtocol")
     assert "BASE_URL" in r["substitution_missed"]
+
+
+@pytest.mark.asyncio
+async def test_local_protocol_error_is_not_retried() -> None:
+    rid = uuid4()
+    script = _Script([httpx.LocalProtocolError("Illegal header value b' lead'"), (200, {})])
+    conn = await _run([_item(rid=rid)], [_eval(rid)], script, _TRANSIENT_BASE_DELAY_MS=1)
+    r = _evidence(conn)["evidence"]["requests"][0]
+    assert r["attempts"] == 1 and r["transport_error"].startswith("LocalProtocolError")
+    assert len(script.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_config_substitution_through_engine_records_raw_and_misses() -> None:
+    rid = uuid4()
+    script = _Script([(200, {"id": "u-1", "msg": "hello abc"})])
+    evals = [
+        _eval(rid, "json_path_eq", {"path": "$.id", "expected": "{{NOPE}}"}),
+        _eval(rid, "body_contains", {"needle": "{{RUN_ID}}"}) | {"id": uuid4()},
+    ]
+    conn = await _run([_item(rid=rid)], evals, script)
+    r = _evidence(conn)["evidence"]["requests"][0]
+    assert r["substitution_missed"] == ["NOPE"]
+    eq, contains = r["evaluations"]
+    assert eq["detail"]["expected_raw"] == "{{NOPE}}" and eq["detail"]["expected"] == "{{NOPE}}"
+    assert contains["detail"]["needle_raw"] == "{{RUN_ID}}" and len(contains["detail"]["needle"]) == 12
 
 
 @pytest.mark.asyncio

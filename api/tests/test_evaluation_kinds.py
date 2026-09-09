@@ -3,8 +3,6 @@ form, config rendering, and the redact-then-bound pass. No DB, no HTTP."""
 
 from __future__ import annotations
 
-import re
-
 import pytest
 from pydantic import ValidationError
 
@@ -272,11 +270,11 @@ def test_checked_in_bundle_captures_match_grammar() -> None:
     import glob
     import json
 
-    caps = [
-        c
+    captures = [
+        (r.get("capture") or {})
         for f in glob.glob("fixtures/*.json")
         for r in json.load(open(f)).get("requests", [])
-        for c in (r.get("capture") or {}).values()
     ]
-    assert caps and all(is_valid_json_path(c) for c in caps)
-    assert not [c for c in caps if re.search(r"RUN_ID", c)]
+    paths = [c for cap in captures for c in cap.values()]
+    assert paths and all(is_valid_json_path(c) for c in paths)
+    assert not [k for cap in captures for k in cap if k == "RUN_ID"]

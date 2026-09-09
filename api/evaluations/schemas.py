@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from api.shared.jsonpath import JSON_PATH_LITE_PATTERN, is_valid_json_path
+from api.shared.jsonpath import is_valid_json_path
 
 
 class EvaluationKind(str, Enum):
@@ -59,7 +59,7 @@ class BodyContainsConfig(BaseModel):
 class _StrictPathConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    path: StrictStr = Field(..., min_length=1, pattern=JSON_PATH_LITE_PATTERN)
+    path: StrictStr = Field(..., min_length=1)
 
     @field_validator("path")
     @classmethod

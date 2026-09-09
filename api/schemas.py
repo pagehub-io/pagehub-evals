@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # What this build of the engine supports beyond what OpenAPI shapes reveal.
 # Consumers migrating suites probe this list rather than inferring from
@@ -31,4 +31,4 @@ class HealthResponse(BaseModel):
     env: str
     git_sha: str
     boot: dict[str, Any] | None = None
-    capabilities: list[str] = Field(default_factory=lambda: list(CAPABILITIES))
+    capabilities: list[str]

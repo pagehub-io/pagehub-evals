@@ -214,13 +214,7 @@ def normalize_for_roundtrip(bundle: dict) -> dict:
 
     def _strip(obj: Any) -> Any:
         if isinstance(obj, dict):
-            # An explicit ``timeout_ms: null`` means the same as an absent key
-            # (engine default); exports omit it, so treat both alike.
-            return {
-                k: _strip(v)
-                for k, v in obj.items()
-                if k not in VOLATILE_FIELDS and not (k == "timeout_ms" and v is None)
-            }
+            return {k: _strip(v) for k, v in obj.items() if k not in VOLATILE_FIELDS}
         if isinstance(obj, list):
             return [_strip(v) for v in obj]
         return obj
@@ -230,6 +224,10 @@ def normalize_for_roundtrip(bundle: dict) -> dict:
 
     requests = [_strip(r) for r in src.get("requests", [])]
     for r in requests:
+        # An explicit request-level ``timeout_ms: null`` means the same as an
+        # absent key (engine default); exports omit it, so treat both alike.
+        if isinstance(r, dict) and r.get("timeout_ms", 0) is None:
+            del r["timeout_ms"]
         if isinstance(r, dict) and isinstance(r.get("evaluations"), list):
             r["evaluations"] = sorted(
                 r["evaluations"],
