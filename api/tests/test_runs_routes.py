@@ -2,7 +2,7 @@
 
 These tests stub out the DB dependency and the engine entry point so we
 can exercise the HTTP shape (status codes, schema validation, harness
-auth clamp, 50-item cap) without needing a live Postgres.
+auth clamp, COLLECTION_ITEM_CAP) without needing a live Postgres.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from api.dependencies import AuthContext, require_auth, require_user
 from api.main import app
+from api.runs._constants import COLLECTION_ITEM_CAP
 from api.shared.db import get_db
 
 # ---------- in-memory fake asyncpg connection ----------
@@ -271,20 +272,20 @@ def test_list_runs_harness_blocked_by_require_user(client_with_harness) -> None:
 
 def test_post_run_collection_over_cap_is_422(client_with_operator, fake_conn: FakeConn) -> None:
     coll_id = uuid4()
-    fake_conn.collection_items_count[coll_id] = 51
+    fake_conn.collection_items_count[coll_id] = COLLECTION_ITEM_CAP + 1
     r = client_with_operator.post(
         "/v1/runs",
         json={"collection_id": str(coll_id), "harness_claim": "I did it"},
     )
     assert r.status_code == 422
     detail = r.json()["detail"]
-    assert "max items=50" in detail
-    assert "51" in detail
+    assert f"max items={COLLECTION_ITEM_CAP}" in detail
+    assert str(COLLECTION_ITEM_CAP + 1) in detail
 
 
 def test_post_run_collection_at_cap_is_accepted(client_with_operator, fake_conn: FakeConn) -> None:
     coll_id = uuid4()
-    fake_conn.collection_items_count[coll_id] = 50
+    fake_conn.collection_items_count[coll_id] = COLLECTION_ITEM_CAP
     r = client_with_operator.post(
         "/v1/runs",
         json={"collection_id": str(coll_id), "harness_claim": "I did it"},

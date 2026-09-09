@@ -111,7 +111,14 @@ async def get_collection(
     return await _row_to_response(auth.db, row)
 
 
-@router.get("/{collection_id}/export", response_model=FixtureBundle)
+@router.get(
+    "/{collection_id}/export",
+    response_model=FixtureBundle,
+    # ``timeout_ms`` is optional and only set when the row carries it;
+    # exclude_unset keeps it out of exports of bundles that never had it.
+    # (Not exclude_none: ``body: null`` and ``description: null`` are real.)
+    response_model_exclude_unset=True,
+)
 async def export_collection(
     collection_id: UUID,
     auth: AuthContext = Depends(require_user),

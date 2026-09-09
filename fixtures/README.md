@@ -31,7 +31,8 @@ lives in the OpenAPI docs (`/docs`, `/redoc`) — `FixtureBundle`,
       "url": "{{BASE_URL}}/get",
       "headers": { "Accept": "application/json" },
       "body": null,                    // arbitrary JSON, or null
-      "capture": { },                  // var_name -> JSONPath-lite ($-prefixed)
+      "capture": { },                  // var_name -> JSONPath-lite ($.field, [int], [?(@.key=='v')])
+      "timeout_ms": 15000,             // OPTIONAL, 100..60000; omit for the engine default (10 s)
       "evaluations": [                 // INLINE under each request
         { "name": "status-ok", "kind": "status_eq", "config": { "expected": 200 } }
       ]
@@ -130,3 +131,64 @@ always external** to this app (see `CLAUDE.md` § "Pure evals — no in-repo
 targets"). A future chess conformance suite, for example, will be a fixture
 whose `requests[]` point at a separately-deployed chess service via
 `{{BASE_URL}}`, not at anything hosted here.
+
+## Evaluation kinds
+
+Every `config` is validated strictly at write time (unknown shape → 422,
+never a stored evaluation that silently never runs). Paths use the
+JSONPath-lite grammar: `$` then one or more of `.field`, `[int]`, or the
+filter `[?(@.key=='value')]` (first object element whose `key` equals the
+string literal; non-object elements are skipped; no coercion). A bare `$`
+is rejected: a non-JSON response is a string, and `$` would resolve to the
+HTML of a 502 page.
+
+| Kind | Config | Passes when | Evidence |
+|---|---|---|---|
+| `status_eq` | `{expected}` | status equals | `{expected, observed}` |
+| `json_path_eq` | `{path, expected}` | value at path equals `expected` (`{{VAR}}` in a string `expected` is rendered) | `{path, expected, expected_raw?, observed, missing?}` |
+| `header_present` | `{header}` | header exists (case-insensitive) | `{header, present}` |
+| `body_contains` | `{needle}` | whole body (JSON dump or text) contains the rendered `needle` | `{needle, needle_raw?, present}` |
+| `json_path_exists` | `{path}` | path resolves, to anything including `null` | `{path, missing, observed_type}` |
+| `json_path_not_exists` | `{path}` | path does not resolve | `{path, missing, observed_type}` |
+| `json_path_contains` | `{path, needle}` | path resolves to a **string** containing the rendered `needle` | `{path, needle, needle_raw, missing, found, observed_type, observed}` (observed bounded to 1,000 chars) |
+| `json_path_cmp` | `{path, op, expected}`, `op` in `gt gte lt lte`, numeric `expected` | path resolves to a JSON number (booleans excluded) and the comparison holds | `{path, op, expected, missing, observed_type, observed}` |
+
+`observed_type` uses JSON names: `object`, `array`, `string`, `number`,
+`boolean`, `null`. Config substitution renders only `expected` (when a
+string) and `needle`, never `path`, using the substitution map as of before
+the request's own captures; a leftover `{{X}}` is reported in the request's
+`substitution_missed`.
+
+## Run-time behaviour worth knowing
+
+- **`{{RUN_ID}}`** is a builtin: the run UUID's hex, first 12 characters,
+  merged after environment variables and before captures. The name is
+  reserved; an environment variable, secret, or capture named `RUN_ID` is
+  a 422.
+- **`timeout_ms`** is per request, 100 to 60,000, default 10,000. httpx's
+  timeout is per phase (connect capped at 10 s, then read/write per chunk),
+  not a total; each attempt additionally has a hard ceiling of
+  `timeout_ms + 10 s` so a trickling response cannot hold a run.
+- **Transient retry.** Every attempt is fired and evaluated; it is re-fired
+  only when it is not passing and the cause is a transport error (timeouts
+  included) or a 429/502/503/504, up to 4 attempts with 250 ms exponential
+  backoff. A deliberately asserted 429 that passes is not retried. Retry is
+  not idempotency-aware: a re-fired `POST` whose first attempt landed may
+  answer 409 on the retry, and that attempt is what is evaluated; read
+  `attempts > 1` in the evidence as "an earlier attempt may have had an
+  effect". Unrendered `{{BASE_URL}}` URLs and malformed headers are
+  deterministic and never retried.
+- **Run budget.** A run's HTTP loop is bounded by 3,600 s (checked before
+  each item and each retry attempt); remaining items are recorded with
+  `transport_error: "skipped: run budget exceeded"`, `attempts: 0`, and the
+  run finishes `error` with `engine_error` set. The count of executed
+  requests includes skipped ones. On Vercel, function duration bounds a
+  run regardless of any of this; long collections need a long-lived
+  process (docker or a worker).
+- **`GET /health`** lists `capabilities` so a consumer can probe what this
+  build supports (the builtin, the filter grammar and the retry policy are
+  not visible in OpenAPI). A runs gate (`RUNS_ENABLED=false`) still answers
+  503 regardless.
+- Evidence is redacted before it is bounded: a secret straddling the
+  1,000-character excerpt cut or the 500-character error-string cut is
+  masked, and evaluation `detail` values are redacted too.

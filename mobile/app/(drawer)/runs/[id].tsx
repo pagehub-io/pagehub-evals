@@ -346,6 +346,18 @@ function formatEvalDetail(ev: RunEvaluationResult): string {
       return `${String(d.header)}: ${d.present ? 'present' : 'missing'}`;
     case 'body_contains':
       return `contains ${JSON.stringify(d.needle)}: ${String(d.present)}`;
+    case 'json_path_exists':
+      return `${String(d.path)}: ${d.missing ? 'missing' : `present (${String(d.observed_type)})`}`;
+    case 'json_path_not_exists':
+      return `${String(d.path)}: ${d.missing ? 'absent' : `present (${String(d.observed_type)})`}`;
+    case 'json_path_contains':
+      if (d.missing) return `${String(d.path)}: missing`;
+      if (d.observed_type !== 'string') return `${String(d.path)}: not a string (${String(d.observed_type)})`;
+      return `${String(d.path)} contains ${JSON.stringify(d.needle)}: ${String(d.found)}`;
+    case 'json_path_cmp':
+      if (d.missing) return `${String(d.path)}: missing`;
+      if (d.observed_type !== 'number') return `${String(d.path)}: not a number (${String(d.observed_type)})`;
+      return `${String(d.path)}: ${String(d.observed)} ${String(d.op)} ${String(d.expected)}`;
     default:
       return JSON.stringify(d);
   }

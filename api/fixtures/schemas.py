@@ -25,11 +25,12 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from api.evaluations.schemas import _CONFIG_VALIDATORS, EvaluationKind
-from api.requests.schemas import _validate_capture_dict
+from api.requests.schemas import TIMEOUT_MS_MAX, TIMEOUT_MS_MIN, _validate_capture_dict
 from api.runs._constants import COLLECTION_ITEM_CAP
+from api.shared.jsonpath import check_reserved_names
 
 FIXTURE_VERSION = 1
 
@@ -75,6 +76,9 @@ class FixtureRequest(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body: Any = None
     capture: dict[str, str] = Field(default_factory=dict)
+    # Absent or null means the engine default. Exports emit the key only
+    # when set, so bundles without it round-trip byte-identically.
+    timeout_ms: StrictInt | None = Field(default=None, ge=TIMEOUT_MS_MIN, le=TIMEOUT_MS_MAX)
     evaluations: list[FixtureEvaluation] = Field(
         default_factory=list, max_length=_MAX_EVALUATIONS_PER_REQUEST
     )
@@ -93,9 +97,16 @@ class FixtureEnvironment(BaseModel):
     # material; the operator fills values in later via PATCH /v1/environments.
     secrets: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("variables")
+    @classmethod
+    def _variables_not_reserved(cls, v: dict[str, str]) -> dict[str, str]:
+        check_reserved_names(v, what="environment")
+        return v
+
     @field_validator("secrets")
     @classmethod
     def _secrets_keys_only(cls, v: dict[str, str]) -> dict[str, str]:
+        check_reserved_names(v, what="environment")
         for key, value in v.items():
             if value != "":
                 raise ValueError(
@@ -203,7 +214,13 @@ def normalize_for_roundtrip(bundle: dict) -> dict:
 
     def _strip(obj: Any) -> Any:
         if isinstance(obj, dict):
-            return {k: _strip(v) for k, v in obj.items() if k not in VOLATILE_FIELDS}
+            # An explicit ``timeout_ms: null`` means the same as an absent key
+            # (engine default); exports omit it, so treat both alike.
+            return {
+                k: _strip(v)
+                for k, v in obj.items()
+                if k not in VOLATILE_FIELDS and not (k == "timeout_ms" and v is None)
+            }
         if isinstance(obj, list):
             return [_strip(v) for v in obj]
         return obj

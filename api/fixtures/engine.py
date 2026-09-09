@@ -114,11 +114,12 @@ async def import_bundle(
     for req in bundle.requests:
         row = await conn.fetchrow(
             """
-            INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+            INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture, timeout_ms)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8)
             ON CONFLICT (owner_user_id, name) DO UPDATE
               SET method = EXCLUDED.method, url = EXCLUDED.url, headers = EXCLUDED.headers,
-                  body = EXCLUDED.body, capture = EXCLUDED.capture, updated_at = now()
+                  body = EXCLUDED.body, capture = EXCLUDED.capture,
+                  timeout_ms = EXCLUDED.timeout_ms, updated_at = now()
             RETURNING id, (xmax = 0) AS inserted
             """,
             actor_id,
@@ -128,6 +129,7 @@ async def import_bundle(
             json.dumps(req.headers),
             json.dumps(req.body) if req.body is not None else None,
             json.dumps(req.capture),
+            req.timeout_ms,
         )
         rid = row["id"]
         name_to_request_id[req.name] = rid
@@ -211,7 +213,8 @@ async def build_export(conn, collection_id: UUID) -> FixtureBundle:
 
     items = await conn.fetch(
         """
-        SELECT ci.position, r.id AS rid, r.name, r.method, r.url, r.headers, r.body, r.capture
+        SELECT ci.position, r.id AS rid, r.name, r.method, r.url, r.headers, r.body, r.capture,
+               r.timeout_ms
         FROM collection_items ci
         JOIN requests r ON r.id = ci.request_id
         WHERE ci.collection_id = $1
@@ -238,6 +241,11 @@ async def build_export(conn, collection_id: UUID) -> FixtureBundle:
             "capture": _coerce_jsonb_dict(it["capture"]),
             "evaluations": [],
         }
+        # Emit the key only when set: with the export route's
+        # ``response_model_exclude_unset``, bundles that never carried it
+        # keep exporting byte-identically.
+        if it["timeout_ms"] is not None:
+            entry["timeout_ms"] = it["timeout_ms"]
         requests_out.append(entry)
         request_index[it["rid"]] = entry
 

@@ -46,6 +46,7 @@ def _row_to_response(row) -> RequestResponse:
         headers=headers,
         body=body,
         capture=capture_raw,
+        timeout_ms=row["timeout_ms"] if "timeout_ms" in row.keys() else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -59,9 +60,9 @@ async def create_request(
     try:
         row = await auth.db.fetchrow(
             """
-            INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
-            RETURNING id, name, method, url, headers, body, capture, created_at, updated_at
+            INSERT INTO requests (owner_user_id, name, method, url, headers, body, capture, timeout_ms)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8)
+            RETURNING id, name, method, url, headers, body, capture, timeout_ms, created_at, updated_at
             """,
             auth.actor_id,
             body.name,
@@ -70,6 +71,7 @@ async def create_request(
             json.dumps(body.headers),
             json.dumps(body.body) if body.body is not None else None,
             json.dumps(body.capture),
+            body.timeout_ms,
         )
     except asyncpg.UniqueViolationError as e:
         raise HTTPException(
@@ -94,7 +96,7 @@ async def list_requests(
 ) -> RequestListResponse:
     rows = await auth.db.fetch(
         """
-        SELECT id, name, method, url, headers, body, capture, created_at, updated_at
+        SELECT id, name, method, url, headers, body, capture, timeout_ms, created_at, updated_at
         FROM requests
         ORDER BY created_at DESC
         LIMIT 500
@@ -110,7 +112,7 @@ async def get_request(
 ) -> RequestResponse:
     row = await auth.db.fetchrow(
         """
-        SELECT id, name, method, url, headers, body, capture, created_at, updated_at
+        SELECT id, name, method, url, headers, body, capture, timeout_ms, created_at, updated_at
         FROM requests
         WHERE id = $1
         """,

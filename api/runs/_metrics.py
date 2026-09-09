@@ -21,18 +21,18 @@ runs_total = Counter(
 )
 
 # Wall-clock duration of a run from started_at to finished_at, in
-# seconds. Bucketed to cover sub-second through the 500s implicit cap
-# (per the per-collection 50-item * 10s timeout bound).
+# seconds. Bucketed to cover sub-second through the run budget
+# (RUN_BUDGET_SECONDS plus one attempt ceiling; see api/runs/_constants.py).
 run_duration_seconds = Histogram(
     "pagehub_evals_run_duration_seconds",
     "Per-run wall-clock duration in seconds, bucketed across the plan's expected envelope.",
     labelnames=("verdict",),
-    buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0),
+    buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0),
 )
 
 # Per-run request count. No labels — distribution-only.
 run_request_count = Histogram(
     "pagehub_evals_run_request_count",
     "Per-run count of executed requests.",
-    buckets=(0, 1, 2, 5, 10, 20, 50),
+    buckets=(0, 1, 2, 5, 10, 20, 50, 100),
 )

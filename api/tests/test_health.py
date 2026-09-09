@@ -21,6 +21,11 @@ def test_health_returns_ok():
     body = r.json()
     assert body["status"] == "ok"
     assert body["env"] == "test"
+    from api.schemas import CAPABILITIES, HealthResponse
+
+    parsed = HealthResponse.model_validate(body)
+    assert parsed.capabilities == list(CAPABILITIES)
+    assert "kinds:json_path_cmp" in parsed.capabilities and "run_budget" in parsed.capabilities
 
 
 def test_metrics_returns_prometheus_payload():

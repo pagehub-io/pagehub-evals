@@ -23,6 +23,7 @@ Public surface is exactly one coroutine: ``execute_run(run_id)``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ import httpx
 
 from api.config import get_settings
 from api.environments.substitution import load_substitution_map_with_secret_keys
+from api.runs._constants import RUN_BUDGET_SECONDS
 from api.runs._metrics import run_duration_seconds, run_request_count, runs_total
 from api.runs._redact import redact_secrets
 from api.runs._ssrf import is_blocked_host
@@ -44,8 +46,28 @@ from api.shared.events import record_event
 logger = logging.getLogger(__name__)
 
 _OUTBOUND_TIMEOUT_SECONDS = 10.0
+_CONNECT_TIMEOUT_CAP_SECONDS = 10.0
+# httpx's read timeout is per chunk, so a target that trickles bytes faster
+# than the read timeout never times out. Each attempt is additionally
+# wrapped in ``asyncio.timeout(timeout + this)`` so a single attempt has a
+# hard ceiling.
+_ATTEMPT_CEILING_EXTRA_SECONDS = 10.0
 _BODY_EXCERPT_MAX_CHARS = 1000
 _TRANSPORT_ERROR_MAX_CHARS = 500
+# Transient retry, the platform runner's rule: an attempt is fired and
+# evaluated; it is re-fired only when it is not passing and the cause is a
+# transport error (timeouts included) or one of these statuses.
+_TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
+_TRANSIENT_MAX_ATTEMPTS = 4
+_TRANSIENT_BASE_DELAY_MS = 250
+# Deterministic transport failures that must not be re-fired: an unrendered
+# ``{{BASE_URL}}`` (no scheme) and a header the sanitiser let through but
+# h11 refuses.
+_NON_TRANSIENT_TRANSPORT_ERRORS = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
+_TIMEOUT_ERROR_NAMES = frozenset(
+    {"ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutError"}
+)
+_FILTER_RE = re.compile(r"\[\?\(@\.([^.\[\]=\s]+)==(?:'([^']*)'|\"([^\"]*)\")\)\]")
 _SUBSTITUTION_TOKEN_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
 
 
@@ -117,6 +139,30 @@ def _resolve_path(body: Any, path: str) -> Any:
                     return _MISSING
                 cur = cur[token]
                 token = ""
+            # Filter form: first object element whose key is a string equal
+            # to the literal. Matched before the integer-index path so a
+            # ']' inside the quoted literal cannot truncate the match.
+            m = _FILTER_RE.match(path, i)
+            if m is not None:
+                key = m.group(1)
+                lit = m.group(2) if m.group(2) is not None else m.group(3)
+                if not isinstance(cur, list):
+                    return _MISSING
+                hit = next(
+                    (
+                        el
+                        for el in cur
+                        if isinstance(el, dict)
+                        and isinstance(el.get(key), str)
+                        and el[key] == lit
+                    ),
+                    _MISSING,
+                )
+                if hit is _MISSING:
+                    return _MISSING
+                cur = hit
+                i = m.end()
+                continue
             close = path.find("]", i)
             if close == -1:
                 return _MISSING
@@ -176,12 +222,137 @@ def _eval_body_contains(_status, body, _headers, config: dict) -> tuple[bool, di
     return contains, {"needle": needle, "present": contains}
 
 
+def _json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _is_json_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _eval_json_path_exists(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    path = config["path"]
+    observed = _resolve_path(body, path)
+    missing = observed is _MISSING
+    return (not missing), {
+        "path": path,
+        "missing": missing,
+        "observed_type": None if missing else _json_type_name(observed),
+    }
+
+
+def _eval_json_path_not_exists(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    path = config["path"]
+    observed = _resolve_path(body, path)
+    missing = observed is _MISSING
+    return missing, {
+        "path": path,
+        "missing": missing,
+        "observed_type": None if missing else _json_type_name(observed),
+    }
+
+
+def _eval_json_path_contains(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    path = config["path"]
+    needle = config["needle"]
+    observed = _resolve_path(body, path)
+    detail: dict[str, Any] = {
+        "path": path,
+        "needle": needle,
+        "needle_raw": config.get("needle_raw", needle),
+        "missing": observed is _MISSING,
+        "found": False,
+        "observed_type": None,
+        "observed": None,
+    }
+    if observed is _MISSING:
+        return False, detail
+    detail["observed_type"] = _json_type_name(observed)
+    if not isinstance(observed, str):
+        return False, detail
+    detail["found"] = needle in observed
+    # Bounded by the caller's redact-then-bound pass.
+    detail["observed"] = observed
+    return detail["found"], detail
+
+
+_CMP_OPS = {
+    "gt": lambda a, b: a > b,
+    "gte": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b,
+    "lte": lambda a, b: a <= b,
+}
+
+
+def _eval_json_path_cmp(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    path = config["path"]
+    op = config["op"]
+    expected = config["expected"]
+    observed = _resolve_path(body, path)
+    detail: dict[str, Any] = {
+        "path": path,
+        "op": op,
+        "expected": expected,
+        "missing": observed is _MISSING,
+        "observed_type": None,
+        "observed": None,
+    }
+    if observed is _MISSING:
+        return False, detail
+    detail["observed_type"] = _json_type_name(observed)
+    if not _is_json_number(observed):
+        return False, detail
+    detail["observed"] = observed
+    return bool(_CMP_OPS[op](observed, expected)), detail
+
+
 _KINDS = {
     "status_eq": _eval_status_eq,
     "json_path_eq": _eval_json_path_eq,
     "header_present": _eval_header_present,
     "body_contains": _eval_body_contains,
+    "json_path_exists": _eval_json_path_exists,
+    "json_path_not_exists": _eval_json_path_not_exists,
+    "json_path_contains": _eval_json_path_contains,
+    "json_path_cmp": _eval_json_path_cmp,
 }
+
+# Config fields rendered through {{VAR}} substitution at evaluation time,
+# by name: never ``path``. Strings only, no coercion.
+_RENDERED_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
+    "json_path_eq": ("expected",),
+    "json_path_contains": ("needle",),
+    "body_contains": ("needle",),
+}
+
+
+def _render_config(kind: str, config: dict, subs: dict[str, str]) -> tuple[dict, list[str]]:
+    """Return ``(rendered_config, missed_names)``; raw values kept as ``<field>_raw``."""
+    fields = _RENDERED_CONFIG_FIELDS.get(kind)
+    if not fields:
+        return config, []
+    out = dict(config)
+    missed: list[str] = []
+    for field in fields:
+        raw = config.get(field)
+        if isinstance(raw, str):
+            rendered = _substitute(raw, subs)
+            out[field] = rendered
+            out[f"{field}_raw"] = raw
+            missed.extend(_find_substitution_misses(rendered))
+    return out, missed
 
 
 # ---------- header sanitisation ----------
@@ -224,14 +395,17 @@ async def _execute_request(
     evaluations: list[dict[str, Any]],
     subs: dict[str, str],
     env_name: str,
-) -> tuple[dict[str, Any], Any]:
+    timeout_s: float = _OUTBOUND_TIMEOUT_SECONDS,
+    timeout_ms: int | None = None,
+) -> tuple[dict[str, Any], Any, bool, bool]:
     """Fire one request, evaluate, return ``(raw_result_dict, raw_response_body)``.
 
-    ``raw_result_dict`` is shaped like ``RunRequestResult`` but is NOT
-    yet redacted — the caller redacts in place after harvesting
-    captures from ``raw_response_body``. This ordering matters: capture
-    paths run against the unredacted response body, and the redaction
-    pass then runs over the persisted fields before validation.
+    Returns ``(raw_result_dict, raw_response_body, transient, fired)``.
+    ``raw_result_dict`` is shaped like ``RunRequestResult`` but is NOT yet
+    redacted or bounded: the caller runs one redact-then-bound pass over
+    it (excerpt, error string, evaluation details) before persistence.
+    ``transient`` is decided where the exception is caught, never derived
+    from the error string; ``fired`` says whether an HTTP attempt went out.
     """
     method = request_row["method"]
 
@@ -263,6 +437,8 @@ async def _execute_request(
     response_headers: dict[str, str] = {}
     response_body: Any = None
     transport_error: str | None = None
+    transient = False
+    fired = False
     started = time.monotonic()
 
     blocked, reason = is_blocked_host(rendered_url, env_name)
@@ -279,16 +455,22 @@ async def _execute_request(
             len(dropped_header_names),
         )
     else:
+        fired = True
         try:
             json_body = rendered_body
-            r = await client.request(
-                method=method,
-                url=rendered_url,
-                headers=safe_headers,
-                json=json_body if (json_body is not None and not isinstance(json_body, str)) else None,
-                content=json_body if isinstance(json_body, str) else None,
-                timeout=_OUTBOUND_TIMEOUT_SECONDS,
-            )
+            async with asyncio.timeout(timeout_s + _ATTEMPT_CEILING_EXTRA_SECONDS):
+                r = await client.request(
+                    method=method,
+                    url=rendered_url,
+                    headers=safe_headers,
+                    json=json_body
+                    if (json_body is not None and not isinstance(json_body, str))
+                    else None,
+                    content=json_body if isinstance(json_body, str) else None,
+                    timeout=httpx.Timeout(
+                        timeout_s, connect=min(timeout_s, _CONNECT_TIMEOUT_CAP_SECONDS)
+                    ),
+                )
             response_status = r.status_code
             response_headers = dict(r.headers)
             ct = r.headers.get("content-type", "")
@@ -299,11 +481,19 @@ async def _execute_request(
                     response_body = r.text
             else:
                 response_body = r.text
+        except TimeoutError:
+            # The per-attempt ceiling: a trickling response that never
+            # trips httpx's per-chunk read timeout.
+            transport_error = "TimeoutError: attempt ceiling"
+            transient = True
+        except _NON_TRANSIENT_TRANSPORT_ERRORS as e:
+            transport_error = f"{type(e).__name__}: {e}"
+        except httpx.TransportError as e:
+            # All four timeout classes, network, protocol and proxy errors.
+            transport_error = f"{type(e).__name__}: {e}"
+            transient = True
         except Exception as e:  # noqa: BLE001
-            # Truncate defensively — httpx exception strings can carry
-            # the full post-substitution URL (with secrets) and DNS
-            # error messages can be adversarially long.
-            transport_error = (f"{type(e).__name__}: {e}")[:_TRANSPORT_ERROR_MAX_CHARS]
+            transport_error = f"{type(e).__name__}: {e}"
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
@@ -314,6 +504,10 @@ async def _execute_request(
             config = ev["config"] or {}
             if isinstance(config, str):
                 config = json.loads(config)
+            config, config_missed = _render_config(kind, config, subs)
+            for name in config_missed:
+                if name not in substitution_missed:
+                    substitution_missed.append(name)
             fn = _KINDS.get(kind)
             if fn is None:
                 eval_results.append({
@@ -347,8 +541,12 @@ async def _execute_request(
                     "error": f"{type(e).__name__}: {e}",
                 })
 
-    body_excerpt = _truncate_body_excerpt(response_body)
-
+    # Excerpt and error string are bounded by the caller AFTER redaction.
+    body_excerpt = response_body
+    is_timeout = transport_error is not None and (
+        transport_error.split(":", 1)[0] in _TIMEOUT_ERROR_NAMES
+    )
+    error_suffix = f" (timeout_ms={timeout_ms})" if (is_timeout and timeout_ms) else ""
     result: dict[str, Any] = {
         "request_id": str(request_row["id"]),
         "request_name": request_row["name"],
@@ -361,8 +559,9 @@ async def _execute_request(
         "transport_error": transport_error,
         "substitution_missed": substitution_missed,
         "evaluations": eval_results,
+        "_error_suffix": error_suffix,
     }
-    return result, response_body
+    return result, response_body, transient, fired
 
 
 def _apply_captures(
@@ -390,20 +589,67 @@ def _apply_captures(
 
 
 def _redact_result_in_place(result: dict[str, Any], secret_values: set[str]) -> None:
-    """Apply secret-value redaction to url + header values + body excerpt + transport_error."""
-    if not secret_values:
-        return
-    result["url"] = redact_secrets(secret_values, result["url"])
-    result["response_headers"] = {
-        k: redact_secrets(secret_values, v) for k, v in result["response_headers"].items()
-    }
-    result["response_body_excerpt"] = redact_secrets(
-        secret_values, result["response_body_excerpt"]
-    )
-    # httpx exception strings can echo the full URL (which has been
-    # substituted with secret values). Redact those before persistence.
+    """One redact-then-bound pass over everything persisted from a result.
+
+    Redaction first, then the size bounds, so a secret straddling a cut
+    cannot leave its prefix behind. Covers url, header values, the body
+    excerpt, the transport error string, and every evaluation detail.
+    """
+    if secret_values:
+        result["url"] = redact_secrets(secret_values, result["url"])
+        result["response_headers"] = {
+            k: redact_secrets(secret_values, v) for k, v in result["response_headers"].items()
+        }
+        result["response_body_excerpt"] = redact_secrets(
+            secret_values, result["response_body_excerpt"]
+        )
+        if result.get("transport_error") is not None:
+            result["transport_error"] = redact_secrets(secret_values, result["transport_error"])
+        for ev in result.get("evaluations", []):
+            if isinstance(ev.get("detail"), dict):
+                ev["detail"] = redact_secrets(secret_values, ev["detail"])
+    # Bounds, per field: excerpt 1,000 chars (strings only), error string
+    # 500 chars with any timeout suffix appended after the cut,
+    # json_path_contains.observed 1,000 chars.
+    result["response_body_excerpt"] = _truncate_body_excerpt(result["response_body_excerpt"])
+    suffix = result.pop("_error_suffix", "") or ""
     if result.get("transport_error") is not None:
-        result["transport_error"] = redact_secrets(secret_values, result["transport_error"])
+        base = result["transport_error"][: max(0, _TRANSPORT_ERROR_MAX_CHARS - len(suffix))]
+        result["transport_error"] = base + suffix
+    for ev in result.get("evaluations", []):
+        detail = ev.get("detail")
+        if ev.get("kind") == "json_path_contains" and isinstance(detail, dict):
+            if isinstance(detail.get("observed"), str):
+                detail["observed"] = detail["observed"][:_BODY_EXCERPT_MAX_CHARS]
+
+
+def _result_passed(result: dict[str, Any]) -> bool:
+    evals_out = result.get("evaluations", [])
+    return (
+        result.get("transport_error") is None
+        and len(evals_out) > 0
+        and all(ev.get("passed", False) for ev in evals_out)
+    )
+
+
+def _skipped_result(req_row: dict[str, Any], subs: dict[str, str]) -> dict[str, Any]:
+    """Record for an item the run budget never let start; mirrors ``blocked:``."""
+    return {
+        "request_id": str(req_row["request_id"]),
+        "request_name": req_row["name"],
+        "method": req_row["method"],
+        "url": _substitute(req_row["url"], subs),
+        "response_status": 0,
+        "response_headers": {},
+        "response_body_excerpt": None,
+        "latency_ms": 0,
+        "transport_error": "skipped: run budget exceeded",
+        "substitution_missed": [],
+        "evaluations": [],
+        "captured": [],
+        "passed": False,
+        "attempts": 0,
+    }
 
 
 # ---------- run aggregation ----------
@@ -475,6 +721,10 @@ async def execute_run(run_id: UUID) -> None:
                 )
                 subs = dict(merged)
                 secret_values = {merged[k] for k in secret_keys if merged.get(k)}
+            # Run builtins: merged after environment variables (a reserved
+            # name is rejected at every write path, so nothing is
+            # overridden in practice) and before captures.
+            subs["RUN_ID"] = run_id.hex[:12]
 
             request_rows: list[dict[str, Any]] = []
             eval_rows_by_request: dict[str, list[dict[str, Any]]] = {}
@@ -489,7 +739,8 @@ async def execute_run(run_id: UUID) -> None:
                         r.url,
                         r.headers,
                         r.body,
-                        r.capture
+                        r.capture,
+                        r.timeout_ms
                     FROM collection_items ci
                     JOIN requests r ON r.id = ci.request_id
                     WHERE ci.collection_id = $1
@@ -519,9 +770,24 @@ async def execute_run(run_id: UUID) -> None:
 
     # ---- HTTP loop: no DB connection held.
     typed_results: list[RunRequestResult] = []
+    budget_started = time.monotonic()
+    budget_tripped = False
+
+    def _budget_exceeded() -> bool:
+        nonlocal budget_tripped
+        if time.monotonic() - budget_started > RUN_BUDGET_SECONDS:
+            budget_tripped = True
+            return True
+        return False
+
     try:
         async with httpx.AsyncClient() as client:
             for req_row in request_rows:
+                if _budget_exceeded():
+                    skipped = _skipped_result(req_row, subs)
+                    _redact_result_in_place(skipped, secret_values)
+                    typed_results.append(RunRequestResult.model_validate(skipped))
+                    continue
                 capture_spec = req_row.get("capture") or {}
                 if isinstance(capture_spec, str):
                     capture_spec = json.loads(capture_spec)
@@ -545,6 +811,8 @@ async def execute_run(run_id: UUID) -> None:
                 # raw_body feeds captures; the raw_dict is then
                 # redacted in place; THEN we compute `captured` keys
                 # and `passed`; THEN model_validate.
+                timeout_ms = req_row.get("timeout_ms")
+                timeout_s = (timeout_ms / 1000.0) if timeout_ms else _OUTBOUND_TIMEOUT_SECONDS
                 proxy_row = {
                     "id": req_row["request_id"],
                     "name": req_row["name"],
@@ -552,32 +820,46 @@ async def execute_run(run_id: UUID) -> None:
                     "url": req_row["url"],
                     "headers": req_row["headers"],
                     "body": req_row["body"],
+                    "timeout_ms": timeout_ms,
                 }
-                result_dict, raw_response_body = await _execute_request(
-                    client,
-                    proxy_row,
-                    ev_rows_normalised,
-                    subs,
-                    settings.env,
-                )
-
-                # (b) redaction pass: url + header values + body excerpt.
+                attempts = 0
+                while True:
+                    attempts += 1
+                    result_dict, raw_response_body, transient, fired = await _execute_request(
+                        client,
+                        proxy_row,
+                        ev_rows_normalised,
+                        subs,
+                        settings.env,
+                        timeout_s,
+                        timeout_ms,
+                    )
+                    passed_now = _result_passed(result_dict)
+                    retryable = (not passed_now) and (
+                        transient
+                        or (
+                            result_dict["transport_error"] is None
+                            and result_dict["response_status"] in _TRANSIENT_STATUSES
+                        )
+                    )
+                    if (
+                        retryable
+                        and attempts < _TRANSIENT_MAX_ATTEMPTS
+                        and not _budget_exceeded()
+                    ):
+                        await asyncio.sleep(
+                            _TRANSIENT_BASE_DELAY_MS / 1000.0 * (2 ** (attempts - 1))
+                        )
+                        continue
+                    break
+                result_dict["attempts"] = attempts if fired else 0
+                # Redact-then-bound pass over everything persisted.
                 _redact_result_in_place(result_dict, secret_values)
-
-                # (c) captures: derived from the *raw* response body so
-                # we can chain values forward. We never persist the values.
+                # Captures come from the raw body so values chain forward;
+                # only their keys are persisted.
                 captured = _apply_captures(raw_response_body, capture_spec, subs)
                 result_dict["captured"] = sorted(captured.keys())
-
-                # Per-request `passed`.
-                evals_out = result_dict.get("evaluations", [])
-                result_dict["passed"] = (
-                    result_dict["transport_error"] is None
-                    and len(evals_out) > 0
-                    and all(ev.get("passed", False) for ev in evals_out)
-                )
-
-                # (d) validate AFTER redaction + captures + passed.
+                result_dict["passed"] = _result_passed(result_dict)
                 typed_results.append(RunRequestResult.model_validate(result_dict))
     except Exception:  # noqa: BLE001
         logger.exception("execute_run: HTTP loop crashed for run %s", run_id)
@@ -587,7 +869,12 @@ async def execute_run(run_id: UUID) -> None:
         return
 
     status, verdict = _aggregate_verdict(typed_results)
-    evidence = RunEvidence(requests=typed_results)
+    if budget_tripped:
+        status, verdict = "error", "error"
+    evidence = RunEvidence(
+        requests=typed_results,
+        engine_error="run budget exceeded" if budget_tripped else None,
+    )
 
     # ---- Acquire #2: terminal UPDATE + completed event.
     try:
