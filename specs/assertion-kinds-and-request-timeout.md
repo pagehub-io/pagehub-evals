@@ -91,7 +91,7 @@ newline that pydantic's regex engine rejects, and the two must agree.
 |---|---|---|---|
 | `json_path_exists` | `{path}` | the path resolves, to any value including `null` | `{path, missing: bool, observed_type}` |
 | `json_path_not_exists` | `{path}` | the path does not resolve | `{path, missing: bool, observed_type}` |
-| `json_path_contains` | `{path, needle}` | the path resolves to a **string** containing the rendered `needle` | `{path, needle, needle_raw, missing: bool, found: bool, observed_type, observed}` |
+| `json_path_contains` | `{path, needle}` | the path resolves and the rendered `needle` occurs in it: a string directly, a non-string JSON-rendered first (matching the platform's `in str(actual)`, so it works on a `$.roles` array) | `{path, needle, needle_raw, missing: bool, found: bool, observed_type, observed}` |
 | `json_path_cmp` | `{path, op, expected}` | the path resolves to a JSON number (`bool` excluded) and `observed op expected` holds | `{path, op, expected, missing: bool, observed_type, observed}` |
 
 Evidence rules, uniform across the new kinds:
@@ -128,9 +128,10 @@ Evidence rules, uniform across the new kinds:
   for `json_path_eq` too.
 - Non-JSON responses are `r.text`, a string: bare `$` would resolve to the
   HTML of a 502 page, which is why the grammar requires a segment.
-- `json_path_contains` on a non-string fails with `observed_type` set; 13
-  of the 14 source conditions target a `text` string field and the 14th
-  targets `notifications[0].message`, also a string.
+- `json_path_contains` renders a non-string value with `json.dumps` before
+  the substring test, matching the platform's `expected in str(actual)`, so
+  a `contains` on an array such as `$.roles` works (a later suite export
+  added these; the earlier one had only string targets).
 - Noted asymmetry, unchanged: `json_path_eq` treats `true == 1`;
   `json_path_cmp` excludes booleans.
 

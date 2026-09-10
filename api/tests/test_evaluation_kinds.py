@@ -92,13 +92,22 @@ def test_not_exists() -> None:
     assert not ok and d["observed_type"] == "object"
 
 
-def test_contains_string_only() -> None:
+def test_contains_string_and_nonstring() -> None:
+    # A string is searched directly.
     ok, d = _run("json_path_contains", {"path": "$.text", "needle": "lo wo"})
     assert ok and d["found"] and d["observed"] == "hello world" and d["needle_raw"] == "lo wo"
     ok, d = _run("json_path_contains", {"path": "$.text", "needle": "zzz"})
     assert not ok and d["found"] is False and d["missing"] is False
+    # A non-string is JSON-rendered first (matches the platform's ``in str(actual)``):
+    # array membership by the rendered element, number by its digits.
+    ok, d = _run("json_path_contains", {"path": "$.items", "needle": "default"},
+                 body={"items": ["default", "care_team"]})
+    assert ok and d["found"] and d["observed_type"] == "array" and d["observed"] == '["default", "care_team"]'
+    ok, d = _run("json_path_contains", {"path": "$.items", "needle": "absent"},
+                 body={"items": ["default"]})
+    assert not ok and d["found"] is False
     ok, d = _run("json_path_contains", {"path": "$.count", "needle": "3"})
-    assert not ok and d["observed_type"] == "number" and d["observed"] is None
+    assert ok and d["observed_type"] == "number" and d["observed"] == "3"
     ok, d = _run("json_path_contains", {"path": "$.absent", "needle": "x"})
     assert not ok and d["missing"] is True and d["observed_type"] is None
 

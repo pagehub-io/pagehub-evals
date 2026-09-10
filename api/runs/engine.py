@@ -283,14 +283,16 @@ def _eval_json_path_contains(_status, body, _headers, config: dict) -> tuple[boo
     if observed is _MISSING:
         return False, detail
     detail["observed_type"] = _json_type_name(observed)
-    if not isinstance(observed, str):
-        return False, detail
     if not needle:
         detail["empty_needle"] = True
         return False, detail
-    detail["found"] = needle in observed
+    # Matches the platform's ``expected in str(actual)``: a string is searched
+    # directly; a non-string (array, object, number) is JSON-rendered first, so
+    # ``contains`` works on e.g. a ``$.roles`` array.
+    rendered = observed if isinstance(observed, str) else json.dumps(observed)
+    detail["found"] = needle in rendered
     # Bounded by the caller's redact-then-bound pass.
-    detail["observed"] = observed
+    detail["observed"] = rendered
     return detail["found"], detail
 
 
