@@ -262,3 +262,19 @@ def test_pre_change_evidence_without_attempts_validates() -> None:
     assert RunEvidence.model_validate({"requests": [old]}).requests[0].attempts == 1
     with pytest.raises(ValidationError):
         RunRequestResult.model_validate(old | {"attempts": -1})
+
+
+@pytest.mark.asyncio
+async def test_failing_non_transient_status_is_not_retried() -> None:
+    # Safety property: a FAILING non-transient status (400/404/500 — none in
+    # the transient set 429/502/503/504) must not be re-fired. The eval fails,
+    # attempts stays 1, and exactly one HTTP call is made (the scripted 2nd
+    # step, a 200, must never be reached).
+    for bad in (400, 404, 500):
+        rid = uuid4()
+        script = _Script([(bad, {}), (200, {})])
+        conn = await _run([_item(rid=rid)], [_eval(rid)], script, _TRANSIENT_BASE_DELAY_MS=1)
+        ev = _evidence(conn)
+        assert ev["status"] == "failed", f"{bad}: status={ev['status']}"
+        assert ev["evidence"]["requests"][0]["attempts"] == 1, f"{bad}: attempts"
+        assert len(script.calls) == 1, f"{bad}: calls={len(script.calls)}"

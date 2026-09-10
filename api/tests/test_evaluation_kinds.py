@@ -135,12 +135,24 @@ def test_contains_is_exact_str_parity_with_platform() -> None:
         assert d["observed"] == str(body["v"])
 
 
-def test_cmp_numbers_bools_and_missing() -> None:
+def test_cmp_float_coercion_parity() -> None:
+    # Real numbers compare.
     assert _run("json_path_cmp", {"path": "$.count", "op": "gte", "expected": 3})[0]
     assert _run("json_path_cmp", {"path": "$.ratio", "op": "gt", "expected": 1})[0]
     assert not _run("json_path_cmp", {"path": "$.count", "op": "lt", "expected": 3})[0]
-    ok, d = _run("json_path_cmp", {"path": "$.flag", "op": "gte", "expected": 1})
-    assert not ok and d["observed_type"] == "boolean" and d["observed"] is None
+    # Platform parity (`a, e = float(actual), float(expected)`): a JSON string
+    # number coerces and compares — the case the number-only guard used to flip.
+    ok, d = _run("json_path_cmp", {"path": "$.v", "op": "gt", "expected": 20}, body={"v": "30"})
+    assert ok and d["observed_type"] == "string" and d["observed"] == "30"
+    # A bool coerces (float(True) == 1.0), like the platform.
+    ok, d = _run("json_path_cmp", {"path": "$.flag", "op": "gte", "expected": 1}, body={"flag": True})
+    assert ok and d["observed_type"] == "boolean"
+    # Non-coercible values fail the comparison (float() raises → uncomparable).
+    ok, d = _run("json_path_cmp", {"path": "$.v", "op": "gt", "expected": 1}, body={"v": "abc"})
+    assert not ok and d.get("uncomparable") and d["observed"] is None
+    ok, d = _run("json_path_cmp", {"path": "$.v", "op": "gt", "expected": 1}, body={"v": [1, 2]})
+    assert not ok and d.get("uncomparable")
+    # Missing path.
     ok, d = _run("json_path_cmp", {"path": "$.absent", "op": "gte", "expected": 1})
     assert not ok and d["missing"] is True
 

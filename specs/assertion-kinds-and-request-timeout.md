@@ -92,7 +92,7 @@ newline that pydantic's regex engine rejects, and the two must agree.
 | `json_path_exists` | `{path}` | the path resolves, to any value including `null` | `{path, missing: bool, observed_type}` |
 | `json_path_not_exists` | `{path}` | the path does not resolve | `{path, missing: bool, observed_type}` |
 | `json_path_contains` | `{path, needle}` | the path resolves and `needle` occurs in it: a string searched directly, a non-string rendered with Python `str()` first — exactly the platform operator `expected in str(actual)`, so it works on a `$.roles` array (empty `needle` fails; see the parity ledger) | `{path, needle, needle_raw, missing: bool, found: bool, observed_type, observed}` |
-| `json_path_cmp` | `{path, op, expected}` | the path resolves to a JSON number (`bool` excluded) and `observed op expected` holds | `{path, op, expected, missing: bool, observed_type, observed}` |
+| `json_path_cmp` | `{path, op, expected}` | the path resolves and `float(observed) op float(expected)` holds — both operands coerced with `float()` exactly like the platform's `a, e = float(actual), float(expected)`, so a JSON string number or a bool compares and a non-coercible value (null, array, object, non-numeric string) fails (`uncomparable`) | `{path, op, expected, missing: bool, observed_type, observed}` |
 
 Evidence rules, uniform across the new kinds:
 
@@ -107,8 +107,8 @@ Evidence rules, uniform across the new kinds:
   string itself, or a non-string's `str()` rendering — the same bytes the
   substring test ran against), **redacted first, then truncated** to
   `_BODY_EXCERPT_MAX_CHARS` (so a secret straddling the cut cannot leak a
-  prefix); for `cmp` it is the number; `exists` / `not_exists` never include
-  the value.
+  prefix); for `cmp` it is the raw observed value (may be a string number);
+  `exists` / `not_exists` never include the value.
 - **The same order is applied to the two existing fields with that shape.**
   Today `_execute_request` truncates `response_body_excerpt` to 1,000 and
   `transport_error` to 500 characters before `_redact_result_in_place`
@@ -143,8 +143,10 @@ Evidence rules, uniform across the new kinds:
   `"" in str(actual)` is a vacuous pass — this matches the engine's own
   `body_contains` and refuses an always-green assertion; no migrated condition
   uses an empty needle.
-- Noted asymmetry, unchanged: `json_path_eq` treats `true == 1`;
-  `json_path_cmp` excludes booleans.
+- Numeric coercion, matching the platform: `json_path_cmp` coerces both
+  operands with `float()`, so a JSON string number (`"30"`) and a bool
+  (`float(True) == 1.0`) compare, and a non-coercible value fails as
+  `uncomparable`. `json_path_eq` separately treats `true == 1` (Python `==`).
 
 Not added: `ne`, regex, array length.
 
@@ -410,8 +412,9 @@ budget changes that. The README says so.
 All under `api/tests/`; DB-backed ones skip cleanly without Postgres; CI
 runs them against `postgres:17`.
 
-- Engine unit tests per new kind: hit, miss, missing path, type mismatch
-  (`bool` for `cmp`, non-string for `contains`), exact evidence dicts.
+- Engine unit tests per new kind: hit, miss, missing path, coercion parity
+  (`cmp` on a numeric string / bool / non-coercible, non-string for `contains`),
+  exact evidence dicts.
   Filter capture: match, no match, non-list, non-object element. Config
   substitution: rendered `expected` and `needle`, evidence raw/rendered,
   leftover template counted in `substitution_missed`. Builtin: `RUN_ID`

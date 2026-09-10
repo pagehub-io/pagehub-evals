@@ -241,10 +241,6 @@ def _json_type_name(value: Any) -> str:
     return type(value).__name__
 
 
-def _is_json_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
 def _eval_json_path_exists(_status, body, _headers, config: dict) -> tuple[bool, dict]:
     path = config["path"]
     observed = _resolve_path(body, path)
@@ -327,10 +323,19 @@ def _eval_json_path_cmp(_status, body, _headers, config: dict) -> tuple[bool, di
     if observed is _MISSING:
         return False, detail
     detail["observed_type"] = _json_type_name(observed)
-    if not _is_json_number(observed):
+    # Platform parity: gt/gte/lt/lte coerce BOTH operands with ``float()`` and
+    # compare, failing (False) when either cannot coerce — exactly the platform
+    # operator ``a, e = float(actual), float(expected)`` (evaluator.py). So a JSON
+    # string number ("30") coerces and compares, a bool coerces (float(True)==1.0),
+    # and None / array / object / a non-numeric string fail the comparison.
+    try:
+        a = float(observed)
+        e = float(expected)
+    except (TypeError, ValueError):
+        detail["uncomparable"] = True
         return False, detail
     detail["observed"] = observed
-    return bool(_CMP_OPS[op](observed, expected)), detail
+    return bool(_CMP_OPS[op](a, e)), detail
 
 
 _KINDS = {
