@@ -8,4 +8,11 @@ shared cap without picking up a transitive dependency on the route layer.
 # Hard cap on items in a collection the run engine will execute. Fixture
 # bundles reuse this so an imported collection can't exceed what a run
 # would refuse to run.
-COLLECTION_ITEM_CAP = 50
+COLLECTION_ITEM_CAP = 90
+
+# Wall-clock budget for one run's HTTP loop, in seconds. Checked before each
+# item and before each retry attempt; once exceeded, remaining items are
+# recorded as skipped and the run finishes ``error``. With the per-attempt
+# ceiling in the engine this bounds a run at budget + one backoff + one
+# attempt ceiling.
+RUN_BUDGET_SECONDS = 3600

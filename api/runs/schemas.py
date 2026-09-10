@@ -67,6 +67,11 @@ class RunRequestResult(BaseModel):
     captured: list[str] = Field(default_factory=list)
     evaluations: list[RunEvaluationResult] = Field(default_factory=list)
     passed: bool
+    # HTTP attempts fired for this item: 1 normally, more after transient
+    # retries, 0 for an item blocked by policy or skipped by the run budget.
+    # Defaults to 1 so evidence persisted before this field existed still
+    # validates on read.
+    attempts: int = Field(default=1, ge=0)
 
 
 class RunEvidence(BaseModel):

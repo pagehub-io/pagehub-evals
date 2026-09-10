@@ -346,6 +346,22 @@ function formatEvalDetail(ev: RunEvaluationResult): string {
       return `${String(d.header)}: ${d.present ? 'present' : 'missing'}`;
     case 'body_contains':
       return `contains ${JSON.stringify(d.needle)}: ${String(d.present)}`;
+    case 'json_path_exists':
+      return `${String(d.path)}: ${d.missing ? 'missing' : `present (${String(d.observed_type)})`}`;
+    case 'json_path_not_exists':
+      return `${String(d.path)}: ${d.missing ? 'absent' : `present (${String(d.observed_type)})`}`;
+    case 'json_path_contains':
+      // `contains` is first-class on non-strings (a non-string is rendered
+      // with str() before the substring test), so render found + observed_type
+      // rather than gating on string.
+      if (d.missing) return `${String(d.path)}: missing`;
+      return `${String(d.path)} (${String(d.observed_type)}) contains ${JSON.stringify(d.needle)}: ${String(d.found)}`;
+    case 'json_path_cmp':
+      // `cmp` coerces both operands with float(), so a numeric string or bool
+      // compares; only a non-coercible value is `uncomparable`.
+      if (d.missing) return `${String(d.path)}: missing`;
+      if (d.uncomparable) return `${String(d.path)}: uncomparable (${String(d.observed_type)})`;
+      return `${String(d.path)}: ${JSON.stringify(d.observed)} ${String(d.op)} ${String(d.expected)}`;
     default:
       return JSON.stringify(d);
   }

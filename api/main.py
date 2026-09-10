@@ -28,6 +28,7 @@ from api.fixtures.routes import router as fixtures_router
 from api.harness_keys.routes import router as harness_keys_router
 from api.requests.routes import router as requests_router
 from api.runs.routes import router as runs_router
+from api.schemas import CAPABILITIES, HealthResponse
 from api.shared.db import close_pool, init_pool
 from api.shared.schema import apply_schema
 from api.shared.twin_middleware import TwinMiddleware
@@ -103,8 +104,8 @@ async def root():
     return {"name": "pagehub-evals", "version": "0.1.0", "docs": "/docs"}
 
 
-@app.get("/health")
-async def health():
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
     settings = get_settings()
     # Surface the fleet bootstrap's per-stage init durations so cold-start
     # debugging (and "is NewRelic actually attached") is answerable from
@@ -118,13 +119,14 @@ async def health():
         boot = dict(_b.BOOT_TIMINGS)
     except ImportError:
         pass
-    return {
-        "status": "ok",
-        "version": "0.1.0",
-        "env": settings.env,
-        "git_sha": settings.git_sha,
-        "boot": boot,
-    }
+    return HealthResponse(
+        status="ok",
+        version="0.1.0",
+        env=settings.env,
+        git_sha=settings.git_sha,
+        boot=boot,
+        capabilities=list(CAPABILITIES),
+    )
 
 
 @app.get("/metrics")

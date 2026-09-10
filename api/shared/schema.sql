@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS requests (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS capture JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Per-request outbound timeout; NULL means the engine default.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS timeout_ms INTEGER;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'requests_timeout_ms_check'
+    ) THEN
+        ALTER TABLE requests
+            ADD CONSTRAINT requests_timeout_ms_check
+            CHECK (timeout_ms IS NULL OR timeout_ms BETWEEN 100 AND 60000);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS requests_owner_idx ON requests (owner_user_id);
 
 -- Idempotent: re-runnable every boot. Postgres has no ADD CONSTRAINT IF NOT

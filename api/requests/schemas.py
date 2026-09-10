@@ -3,12 +3,15 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
+
+from api.shared.jsonpath import check_reserved_names, is_valid_json_path
 
 ALLOWED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 _CAPTURE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_CAPTURE_VALUE_RE = re.compile(r"^\$")
+TIMEOUT_MS_MIN = 100
+TIMEOUT_MS_MAX = 60000
 _MAX_CAPTURE_ENTRIES = 32
 _MAX_CAPTURE_KEY_LEN = 64
 
@@ -23,10 +26,12 @@ def _validate_capture_dict(v: dict[str, str]) -> dict[str, str]:
             raise ValueError(
                 f"capture key must match ^[A-Za-z_][A-Za-z0-9_]*$: {k!r}"
             )
-        if not isinstance(val, str) or not _CAPTURE_VALUE_RE.match(val):
+        if not is_valid_json_path(val):
             raise ValueError(
-                f"capture value must be a JSONPath-lite string starting with '$': {val!r}"
+                "capture value must match the JSONPath-lite grammar "
+                f"($.field, [int], [?(@.key=='value')]): {val!r}"
             )
+    check_reserved_names(v, what="capture")
     return v
 
 
@@ -37,6 +42,9 @@ class CreateRequestRequest(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body: Any = None
     capture: dict[str, str] = Field(default_factory=dict)
+    # None means the engine default. Bounded so a bundle cannot make every
+    # request fail instantly by accident, nor hold a run open indefinitely.
+    timeout_ms: StrictInt | None = Field(default=None, ge=TIMEOUT_MS_MIN, le=TIMEOUT_MS_MAX)
 
     @field_validator("capture")
     @classmethod
@@ -70,6 +78,7 @@ class RequestResponse(BaseModel):
     headers: dict[str, str]
     body: Any
     capture: dict[str, str] = Field(default_factory=dict)
+    timeout_ms: int | None = None
     created_at: datetime
     updated_at: datetime
 
