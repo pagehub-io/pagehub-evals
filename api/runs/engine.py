@@ -286,13 +286,20 @@ def _eval_json_path_contains(_status, body, _headers, config: dict) -> tuple[boo
     if not needle:
         detail["empty_needle"] = True
         return False, detail
-    # Matches the platform's ``expected in str(actual)``: a string is searched
-    # directly; a non-string (array, object, number) is JSON-rendered first, so
-    # ``contains`` works on e.g. a ``$.roles`` array.
-    rendered = observed if isinstance(observed, str) else json.dumps(observed)
-    detail["found"] = needle in rendered
-    # Bounded by the caller's redact-then-bound pass.
-    detail["observed"] = rendered
+    # Exact parity with the platform operator, which is verbatim
+    # ``expected in str(actual)``: a string is searched directly; a non-string
+    # (array, object, number, bool, null) is rendered with Python ``str()`` —
+    # NOT ``json.dumps`` — so ``True``/``False``/``None`` and container quoting
+    # match the operator this kind replaces (``json.dumps`` would render
+    # ``true``/``null`` and double-quote elements, flipping some verdicts).
+    # ``contains`` thus works on e.g. a ``$.roles`` array. Empty needle is the
+    # one deliberate divergence (fails here vs a vacuous platform pass): see the
+    # spec's parity ledger — it is consistent with the engine's ``body_contains``.
+    haystack = observed if isinstance(observed, str) else str(observed)
+    detail["found"] = needle in haystack
+    # Evidence == the searched haystack (matches the platform's ``{actual!r}``
+    # message form); bounded by the caller's redact-then-bound pass.
+    detail["observed"] = haystack
     return detail["found"], detail
 
 

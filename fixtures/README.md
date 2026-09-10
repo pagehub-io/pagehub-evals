@@ -150,7 +150,7 @@ HTML of a 502 page.
 | `body_contains` | `{needle}` | whole body (JSON dump or text) contains the rendered `needle` | `{needle, needle_raw?, present}` |
 | `json_path_exists` | `{path}` | path resolves, to anything including `null` | `{path, missing, observed_type}` |
 | `json_path_not_exists` | `{path}` | path does not resolve | `{path, missing, observed_type}` |
-| `json_path_contains` | `{path, needle}` | path resolves to a **string** containing the rendered `needle` | `{path, needle, needle_raw, missing, found, observed_type, observed}` (observed bounded to 1,000 chars) |
+| `json_path_contains` | `{path, needle}` | path resolves and `needle` occurs in it — a string searched directly, a non-string rendered with Python `str()` first (exactly the platform's `expected in str(actual)`, so it works on e.g. a `$.roles` array); empty `needle` fails | `{path, needle, needle_raw, missing, found, observed_type, observed}` (observed bounded to 1,000 chars) |
 | `json_path_cmp` | `{path, op, expected}`, `op` in `gt gte lt lte`, numeric `expected` | path resolves to a JSON number (booleans excluded) and the comparison holds | `{path, op, expected, missing, observed_type, observed}` |
 
 `observed_type` uses JSON names: `object`, `array`, `string`, `number`,

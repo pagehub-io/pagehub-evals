@@ -98,11 +98,13 @@ def test_contains_string_and_nonstring() -> None:
     assert ok and d["found"] and d["observed"] == "hello world" and d["needle_raw"] == "lo wo"
     ok, d = _run("json_path_contains", {"path": "$.text", "needle": "zzz"})
     assert not ok and d["found"] is False and d["missing"] is False
-    # A non-string is JSON-rendered first (matches the platform's ``in str(actual)``):
-    # array membership by the rendered element, number by its digits.
+    # A non-string is rendered with Python ``str()`` and searched, EXACTLY as the
+    # platform operator (``expected in str(actual)``). Array membership works via
+    # the bare element, number via its digits; evidence == the searched haystack.
     ok, d = _run("json_path_contains", {"path": "$.items", "needle": "default"},
                  body={"items": ["default", "care_team"]})
-    assert ok and d["found"] and d["observed_type"] == "array" and d["observed"] == '["default", "care_team"]'
+    assert ok and d["found"] and d["observed_type"] == "array"
+    assert d["observed"] == "['default', 'care_team']"  # str(), not json.dumps
     ok, d = _run("json_path_contains", {"path": "$.items", "needle": "absent"},
                  body={"items": ["default"]})
     assert not ok and d["found"] is False
@@ -110,6 +112,27 @@ def test_contains_string_and_nonstring() -> None:
     assert ok and d["observed_type"] == "number" and d["observed"] == "3"
     ok, d = _run("json_path_contains", {"path": "$.absent", "needle": "x"})
     assert not ok and d["missing"] is True and d["observed_type"] is None
+
+
+def test_contains_is_exact_str_parity_with_platform() -> None:
+    # Pin the parity claim itself: for every non-string type the engine result
+    # must equal ``needle in str(actual)`` — the verbatim platform operator.
+    # This is the case json.dumps rendering silently flipped (true/True,
+    # null/None, container quoting).
+    cases = [
+        ({"v": True}, "True"), ({"v": True}, "true"),
+        ({"v": False}, "False"), ({"v": False}, "false"),
+        ({"v": None}, "None"), ({"v": None}, "null"),
+        ({"v": ["default", "care_team"]}, "'default'"),
+        ({"v": ["default", "care_team"]}, '"default"'),
+        ({"v": {"name": "default"}}, "'name'"),
+        ({"v": 1.0}, "1.0"), ({"v": 1.0}, "1"),
+    ]
+    for body, needle in cases:
+        ok, d = _run("json_path_contains", {"path": "$.v", "needle": needle}, body=body)
+        expected = needle in str(body["v"])
+        assert ok is expected, f"{body['v']!r} contains {needle!r}: engine={ok} platform={expected}"
+        assert d["observed"] == str(body["v"])
 
 
 def test_cmp_numbers_bools_and_missing() -> None:

@@ -91,7 +91,7 @@ newline that pydantic's regex engine rejects, and the two must agree.
 |---|---|---|---|
 | `json_path_exists` | `{path}` | the path resolves, to any value including `null` | `{path, missing: bool, observed_type}` |
 | `json_path_not_exists` | `{path}` | the path does not resolve | `{path, missing: bool, observed_type}` |
-| `json_path_contains` | `{path, needle}` | the path resolves and the rendered `needle` occurs in it: a string directly, a non-string JSON-rendered first (matching the platform's `in str(actual)`, so it works on a `$.roles` array) | `{path, needle, needle_raw, missing: bool, found: bool, observed_type, observed}` |
+| `json_path_contains` | `{path, needle}` | the path resolves and `needle` occurs in it: a string searched directly, a non-string rendered with Python `str()` first — exactly the platform operator `expected in str(actual)`, so it works on a `$.roles` array (empty `needle` fails; see the parity ledger) | `{path, needle, needle_raw, missing: bool, found: bool, observed_type, observed}` |
 | `json_path_cmp` | `{path, op, expected}` | the path resolves to a JSON number (`bool` excluded) and `observed op expected` holds | `{path, op, expected, missing: bool, observed_type, observed}` |
 
 Evidence rules, uniform across the new kinds:
@@ -103,10 +103,12 @@ Evidence rules, uniform across the new kinds:
 - `observed` is `null` whenever `missing` or the type did not match; the
   `_MISSING` sentinel never reaches an evidence dict (serialising it raises
   inside the terminal-write `try` and the run would stay `running`).
-- `observed` is JSON-native and bounded: for `contains` the string is
-  **redacted first, then truncated** to `_BODY_EXCERPT_MAX_CHARS` (so a
-  secret straddling the cut cannot leak a prefix); for `cmp` it is the
-  number; `exists` / `not_exists` never include the value.
+- `observed` is bounded: for `contains` it is the searched haystack (the
+  string itself, or a non-string's `str()` rendering — the same bytes the
+  substring test ran against), **redacted first, then truncated** to
+  `_BODY_EXCERPT_MAX_CHARS` (so a secret straddling the cut cannot leak a
+  prefix); for `cmp` it is the number; `exists` / `not_exists` never include
+  the value.
 - **The same order is applied to the two existing fields with that shape.**
   Today `_execute_request` truncates `response_body_excerpt` to 1,000 and
   `transport_error` to 500 characters before `_redact_result_in_place`
@@ -128,10 +130,19 @@ Evidence rules, uniform across the new kinds:
   for `json_path_eq` too.
 - Non-JSON responses are `r.text`, a string: bare `$` would resolve to the
   HTML of a 502 page, which is why the grammar requires a segment.
-- `json_path_contains` renders a non-string value with `json.dumps` before
-  the substring test, matching the platform's `expected in str(actual)`, so
-  a `contains` on an array such as `$.roles` works (a later suite export
-  added these; the earlier one had only string targets).
+- **Parity ledger — `json_path_contains` vs the platform `contains`.** The
+  platform operator is verbatim `expected in str(actual)`. The kind renders a
+  non-string value with Python `str()` (NOT `json.dumps`) before the substring
+  test, so it reproduces the operator exactly — including `True`/`False`/`None`
+  and the single-quote container form. `json.dumps` was rejected here because it
+  would render `true`/`false`/`null` and double-quote elements, flipping the
+  verdict for a `contains` on a boolean, a null, or a needle that includes a
+  quote. So a `contains` on an array such as `$.roles` works (a later suite
+  export added these; the earlier one had only string targets). One **deliberate
+  divergence**: an empty `needle` fails here (`empty_needle`), where the platform
+  `"" in str(actual)` is a vacuous pass — this matches the engine's own
+  `body_contains` and refuses an always-green assertion; no migrated condition
+  uses an empty needle.
 - Noted asymmetry, unchanged: `json_path_eq` treats `true == 1`;
   `json_path_cmp` excludes booleans.
 
