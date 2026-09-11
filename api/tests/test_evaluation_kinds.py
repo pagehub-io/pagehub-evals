@@ -322,3 +322,138 @@ def test_checked_in_bundle_captures_match_grammar() -> None:
     paths = [c for cap in captures for c in cap.values()]
     assert paths and all(is_valid_json_path(c) for c in paths)
     assert not [k for cap in captures for k in cap if k == "RUN_ID"]
+
+
+# ---------- negated kinds: json_path_not_contains, json_path_neq (+ raw path="") ----------
+
+def test_not_contains_pathed_hit_miss_missing_empty() -> None:
+    # Needle ABSENT → passes; found=False.
+    ok, d = _run("json_path_not_contains", {"path": "$.text", "needle": "zzz"})
+    assert ok and d["found"] is False and d["missing"] is False and d["observed"] == "hello world"
+    # Needle PRESENT → fails; found=True (membership exposed, not the verdict).
+    ok, d = _run("json_path_not_contains", {"path": "$.text", "needle": "lo wo"})
+    assert not ok and d["found"] is True
+    # Missing path → False (platform parity: a missing path fails EVERY compare
+    # operator; a blanket `not contains()` would flip this to a vacuous pass).
+    ok, d = _run("json_path_not_contains", {"path": "$.absent", "needle": "x"})
+    assert not ok and d["missing"] is True and d["observed_type"] is None
+    # Empty needle → False ("" is in everything, so "" not in x is False).
+    ok, d = _run("json_path_not_contains", {"path": "$.text", "needle": ""})
+    assert not ok and d.get("empty_needle") is True
+
+
+def test_not_contains_is_exact_str_parity_with_platform() -> None:
+    # Negated mirror of the contains parity: verdict must equal
+    # ``needle not in str(actual)`` for every type (str(), never json.dumps).
+    cases = [
+        ({"v": True}, "True"), ({"v": True}, "true"),
+        ({"v": None}, "None"), ({"v": None}, "null"),
+        ({"v": ["default", "care_team"]}, "'default'"),
+        ({"v": ["default", "care_team"]}, '"default"'),
+        ({"v": {"name": "default"}}, "'name'"),
+    ]
+    for body, needle in cases:
+        ok, d = _run("json_path_not_contains", {"path": "$.v", "needle": needle}, body=body)
+        expected = needle not in str(body["v"])
+        assert ok is expected, f"{body['v']!r} not_contains {needle!r}: engine={ok} platform={expected}"
+        assert d["observed"] == str(body["v"])
+
+
+def test_contains_and_not_contains_raw_whole_body() -> None:
+    # path="" is the raw whole-body match (platform path==""). Haystack is
+    # str(body) — single-quoted repr, NOT json.dumps.
+    body = {"role": "admin", "id": "u-1"}
+    ok, d = _run("json_path_contains", {"path": "", "needle": "'role': 'admin'"}, body=body)
+    assert ok and d["found"] and d["missing"] is False and d["observed"] == str(body)
+    # The exact json.dumps-vs-str() divergence: the double-quoted form is NOT present.
+    assert not _run("json_path_contains", {"path": "", "needle": '"role": "admin"'}, body=body)[0]
+    # Raw not_contains: a token absent from the whole body → passes (the
+    # scope-enforcement "field is absent" assertion).
+    ok, d = _run("json_path_not_contains", {"path": "", "needle": "secret-leak"}, body=body)
+    assert ok and d["found"] is False and d["observed"] == str(body)
+    # ...and present → fails.
+    assert not _run("json_path_not_contains", {"path": "", "needle": "u-1"}, body=body)[0]
+
+
+def test_neq_hit_miss_missing_no_coercion() -> None:
+    # Differs → passes.
+    ok, d = _run("json_path_neq", {"path": "$.count", "expected": 4})
+    assert ok and d["observed"] == 3
+    # Equal → fails.
+    ok, d = _run("json_path_neq", {"path": "$.count", "expected": 3})
+    assert not ok
+    # Missing path → False (platform parity; NOT a vacuous True).
+    ok, d = _run("json_path_neq", {"path": "$.absent", "expected": 1})
+    assert not ok and d["missing"] is True and d["observed"] is None
+    # No coercion (plain !=): int 3 != str "3" → passes, exactly like platform's
+    # `actual != expected` (contrast json_path_cmp, which floats both operands).
+    ok, d = _run("json_path_neq", {"path": "$.count", "expected": "3"})
+    assert ok
+    # None expected against a present-null field → equal → fails.
+    ok, d = _run("json_path_neq", {"path": "$.nothing", "expected": None})
+    assert not ok
+
+
+def test_render_config_negated_kinds_substitutes() -> None:
+    # C3: without these fields in _RENDERED_CONFIG_FIELDS the {{VAR}} is compared
+    # literally and the leak/scope assertion passes vacuously. Pin that they render.
+    subs = {"CARE_UID": "u-9", "RUN_ID": "abc"}
+    cfg, missed = _render_config("json_path_neq", {"path": "$.author_id", "expected": "{{CARE_UID}}"}, subs)
+    assert cfg["expected"] == "u-9" and cfg["expected_raw"] == "{{CARE_UID}}" and missed == []
+    cfg, missed = _render_config("json_path_not_contains", {"path": "$.messages", "needle": "brief {{RUN_ID}}"}, subs)
+    assert cfg["needle"] == "brief abc" and cfg["needle_raw"] == "brief {{RUN_ID}}"
+    # A non-scalar expected is NOT recursed (documented I-A limitation, inherited
+    # from json_path_eq): the token survives. The Phase-B lint forbids this shape.
+    cfg, _ = _render_config("json_path_neq", {"path": "$.x", "expected": {"id": "{{CARE_UID}}"}}, subs)
+    assert cfg["expected"] == {"id": "{{CARE_UID}}"}
+
+    # End-to-end leak detection: render then evaluate. The captured id actually
+    # leaked (observed == resolved var) → neq must FAIL (catch the leak).
+    rendered, _ = _render_config("json_path_neq", {"path": "$.author_id", "expected": "{{CARE_UID}}"}, subs)
+    ok, _ = _run("json_path_neq", rendered, body={"author_id": "u-9"})
+    assert ok is False
+
+
+@pytest.mark.parametrize(
+    "kind,config",
+    [
+        ("json_path_not_contains", {"path": "$.a", "needle": ""}),   # empty needle
+        ("json_path_not_contains", {"path": "$.a", "needle": 5}),    # non-str needle
+        ("json_path_not_contains", {"path": "$", "needle": "x"}),    # bare $ invalid
+        ("json_path_not_contains", {"path": "$.", "needle": "x"}),   # $. invalid
+        ("json_path_not_contains", {"path": "items", "needle": "x"}),  # bare (unprefixed) invalid
+        ("json_path_not_contains", {"path": "$.a", "needle": "x", "extra": 1}),  # extra
+        ("json_path_neq", {}),                                       # missing path
+        ("json_path_neq", {"path": "$", "expected": "x"}),           # bare $ (strict)
+        ("json_path_neq", {"path": "", "expected": "x"}),            # raw NOT allowed for neq
+        ("json_path_neq", {"path": "$.a", "expected": "x", "extra": 1}),  # extra
+        ("json_path_neq", {"path": "$.a", "expected": {"id": "{{X}}"}}),  # structured (fail-open)
+        ("json_path_neq", {"path": "$.a", "expected": ["{{X}}"]}),        # structured list
+    ],
+)
+def test_negated_kind_configs_rejected(kind: str, config: dict) -> None:
+    with pytest.raises(ValidationError):
+        CreateEvaluationRequest(name="e", kind=kind, config=config)
+
+
+@pytest.mark.parametrize(
+    "kind,config",
+    [
+        ("json_path_not_contains", {"path": "$.text", "needle": "x"}),   # pathed
+        ("json_path_not_contains", {"path": "", "needle": "x"}),         # raw whole-body OK
+        ("json_path_contains", {"path": "", "needle": "x"}),             # raw now accepted (was strict-rejected)
+        ("json_path_contains", {"path": "$.items[0].id", "needle": "x"}),  # field-then-index still OK
+        ("json_path_neq", {"path": "$.author_id", "expected": "x"}),
+        ("json_path_neq", {"path": "$.comments[0].replies[0].body", "expected": None}),  # None expected OK
+    ],
+)
+def test_negated_kind_configs_accepted(kind: str, config: dict) -> None:
+    ev = CreateEvaluationRequest(name="e", kind=kind, config=config)
+    assert ev.config == config  # stored verbatim
+
+
+def test_collection_item_cap_admits_role_screenshots() -> None:
+    # serve-role-screenshots is 170 items; the cap was raised 90->200 for it.
+    # Guard against an accidental lowering below that floor.
+    from api.runs._constants import COLLECTION_ITEM_CAP
+    assert COLLECTION_ITEM_CAP >= 170

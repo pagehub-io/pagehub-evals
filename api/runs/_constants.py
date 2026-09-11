@@ -8,7 +8,7 @@ shared cap without picking up a transitive dependency on the route layer.
 # Hard cap on items in a collection the run engine will execute. Fixture
 # bundles reuse this so an imported collection can't exceed what a run
 # would refuse to run.
-COLLECTION_ITEM_CAP = 90
+COLLECTION_ITEM_CAP = 200  # raised from 90 for serve-role-screenshots (170 items); aligns with _MAX_REQUESTS
 
 # Wall-clock budget for one run's HTTP loop, in seconds. Checked before each
 # item and before each retry attempt; once exceeded, remaining items are

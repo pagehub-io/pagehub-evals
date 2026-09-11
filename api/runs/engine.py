@@ -266,7 +266,11 @@ def _eval_json_path_not_exists(_status, body, _headers, config: dict) -> tuple[b
 def _eval_json_path_contains(_status, body, _headers, config: dict) -> tuple[bool, dict]:
     path = config["path"]
     needle = config["needle"]
-    observed = _resolve_path(body, path)
+    # path=="" is the raw whole-body match (platform:
+    # ``actual = _extract_path(body, path) if path else (body, True)``); any
+    # non-empty path resolves normally. ``_resolve_path`` returns _MISSING for
+    # "", so the empty case is handled here, not in the resolver.
+    observed = body if path == "" else _resolve_path(body, path)
     detail: dict[str, Any] = {
         "path": path,
         "needle": needle,
@@ -338,6 +342,58 @@ def _eval_json_path_cmp(_status, body, _headers, config: dict) -> tuple[bool, di
     return bool(_CMP_OPS[op](a, e)), detail
 
 
+def _eval_json_path_not_contains(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    # Negated mirror of ``_eval_json_path_contains``: passes when the needle is
+    # ABSENT. Parity with the platform ``not_contains`` operator
+    # (evaluator.py: ``expected not in str(actual)``). Same path/render/str()
+    # rules as contains, including path=="" (raw whole body).
+    path = config["path"]
+    needle = config["needle"]
+    observed = body if path == "" else _resolve_path(body, path)
+    detail: dict[str, Any] = {
+        "path": path,
+        "needle": needle,
+        "needle_raw": config.get("needle_raw", needle),
+        "missing": observed is _MISSING,
+        "found": False,
+        "observed_type": None,
+        "observed": None,
+    }
+    if observed is _MISSING:
+        # Platform parity: a missing path fails EVERY compare operator
+        # (``if not found: passed=False``) — NOT a vacuous pass. A naive
+        # ``not contains()`` would flip this and silently pass the leak/scope
+        # assertions this kind exists to enforce.
+        return False, detail
+    detail["observed_type"] = _json_type_name(observed)
+    if not needle:
+        # Platform: ``"" not in str(actual)`` is always False (empty substring
+        # is in everything). Consistent with json_path_contains's empty needle.
+        detail["empty_needle"] = True
+        return False, detail
+    haystack = observed if isinstance(observed, str) else str(observed)
+    detail["found"] = needle in haystack  # membership; verdict = not found
+    detail["observed"] = haystack
+    return (not detail["found"]), detail
+
+
+def _eval_json_path_neq(_status, body, _headers, config: dict) -> tuple[bool, dict]:
+    # Negated mirror of ``_eval_json_path_eq``: plain ``!=`` with no coercion
+    # (platform ``neq``: ``actual != expected``). Always pathed (no raw variant).
+    path = config["path"]
+    expected = config["expected"]
+    observed = _resolve_path(body, path)
+    detail: dict[str, Any] = {"path": path, "expected": expected}
+    if "expected_raw" in config:
+        detail["expected_raw"] = config["expected_raw"]
+    if observed is _MISSING:
+        # Platform parity: missing path → False (NOT a vacuous True).
+        detail.update({"observed": None, "missing": True})
+        return False, detail
+    detail["observed"] = observed
+    return observed != expected, detail
+
+
 _KINDS = {
     "status_eq": _eval_status_eq,
     "json_path_eq": _eval_json_path_eq,
@@ -346,14 +402,18 @@ _KINDS = {
     "json_path_exists": _eval_json_path_exists,
     "json_path_not_exists": _eval_json_path_not_exists,
     "json_path_contains": _eval_json_path_contains,
+    "json_path_not_contains": _eval_json_path_not_contains,
     "json_path_cmp": _eval_json_path_cmp,
+    "json_path_neq": _eval_json_path_neq,
 }
 
 # Config fields rendered through {{VAR}} substitution at evaluation time,
 # by name: never ``path``. Strings only, no coercion.
 _RENDERED_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     "json_path_eq": ("expected",),
+    "json_path_neq": ("expected",),
     "json_path_contains": ("needle",),
+    "json_path_not_contains": ("needle",),
     "body_contains": ("needle",),
 }
 
@@ -638,7 +698,7 @@ def _redact_result_in_place(result: dict[str, Any], secret_values: set[str]) -> 
         result["transport_error"] = base + suffix
     for ev in result.get("evaluations", []):
         detail = ev.get("detail")
-        if ev.get("kind") == "json_path_contains" and isinstance(detail, dict):
+        if ev.get("kind") in ("json_path_contains", "json_path_not_contains", "json_path_neq") and isinstance(detail, dict):
             if isinstance(detail.get("observed"), str):
                 detail["observed"] = detail["observed"][:_BODY_EXCERPT_MAX_CHARS]
 
