@@ -732,6 +732,48 @@ def _skipped_result(req_row: dict[str, Any], subs: dict[str, str]) -> dict[str, 
     }
 
 
+# ---------- evidence serialisation ----------
+
+# Code points Postgres ``text``/``jsonb`` cannot store. NUL: jsonb refuses the
+# ``\u0000`` escape ``json.dumps`` emits for it ("unsupported Unicode escape
+# sequence"). UTF-16 surrogates: a Python str only ever holds them unpaired
+# (``json.loads`` combines a valid pair), e.g. from a JSON body carrying
+# ``"\ud800"``, and jsonb rejects those escapes too. Response bodies are
+# decoded leniently, so a binary body (an image, say) decodes to text full of
+# NULs. It stays a text excerpt, NUL-free, rather than being special-cased:
+# evaluations and captures still see exactly the body the target sent; only
+# what is persisted is rewritten.
+_PG_UNSAFE_CHARS_RE = re.compile(r"[\x00\ud800-\udfff]")
+_PG_REPLACEMENT_CHAR = "\N{REPLACEMENT CHARACTER}"
+
+
+def _pg_safe(obj: Any) -> Any:
+    """Return a copy of ``obj`` whose every string (dict keys included) Postgres
+    can store: each unstorable code point becomes U+FFFD. Non-strings pass
+    through. Keys that collide once rewritten (``"a\\x00"`` and ``"a\\ufffd"``)
+    keep the last value, which is acceptable for an excerpt."""
+    if isinstance(obj, str):
+        return _PG_UNSAFE_CHARS_RE.sub(_PG_REPLACEMENT_CHAR, obj)
+    if isinstance(obj, dict):
+        return {_pg_safe(k): _pg_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [_pg_safe(v) for v in obj]
+    return obj
+
+
+def _evidence_json(evidence: RunEvidence) -> str:
+    """Serialise evidence for ``runs.evidence``. Every terminal write uses this.
+
+    Sanitises the Python-mode dump, then re-validates and dumps in JSON mode.
+    The order matters: the JSON-mode dump raises ``UnicodeEncodeError`` on a
+    lone surrogate in a dict key (values are fine), so sanitising after it is
+    too late. The JSON-mode dump still does the rest (UUIDs to strings, NaN
+    and infinities to ``null``, which jsonb would refuse as well).
+    """
+    cleaned = _pg_safe(evidence.model_dump(mode="python"))
+    return json.dumps(RunEvidence.model_validate(cleaned).model_dump(mode="json"))
+
+
 # ---------- run aggregation ----------
 
 
@@ -968,7 +1010,7 @@ async def execute_run(run_id: UUID) -> None:
                 """,
                 status,
                 verdict,
-                json.dumps(evidence.model_dump(mode="json")),
+                _evidence_json(evidence),
                 run_id,
             )
             if updated is None:
@@ -1011,8 +1053,18 @@ async def execute_run(run_id: UUID) -> None:
             len(typed_results),
             duration_ms,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.exception("execute_run: terminal write failed for run %s", run_id)
+        # Never leave the run 'running': nothing reaps stale runs, so a runner
+        # polling it would hang to its own ceiling. Finish it as an engine
+        # error without request evidence, the likeliest cause of the failure.
+        # If the UPDATE landed and only the completion event failed, this is a
+        # no-op (its ``status = 'running'`` guard matches 0 rows).
+        await _record_terminal_error(
+            run_id,
+            [],
+            engine_error=f"terminal write failed ({type(exc).__name__}); request evidence dropped",
+        )
 
 
 async def _record_terminal_error(
@@ -1021,48 +1073,67 @@ async def _record_terminal_error(
     *,
     engine_error: str,
 ) -> None:
-    """Best-effort terminal-error write when the engine itself bombs out."""
-    try:
-        evidence = RunEvidence(requests=request_results, engine_error=engine_error)
-        evidence_json = evidence.model_dump(mode="json")
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            updated = await conn.fetchrow(
-                """
-                UPDATE runs
-                SET status = 'error', verdict = 'error', evidence = $1::jsonb,
-                    finished_at = now()
-                WHERE id = $2 AND status = 'running'
-                RETURNING id
-                """,
-                json.dumps(evidence_json),
+    """Best-effort terminal-error write when the engine itself bombs out.
+
+    If the write fails while carrying request results it is retried once
+    without them, so evidence content can never keep a run ``running``.
+    """
+    attempts = [(request_results, engine_error)]
+    if request_results:
+        attempts.append(([], f"{engine_error}; request evidence dropped"))
+    for results, error in attempts:
+        try:
+            await _write_terminal_error(run_id, results, error)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "execute_run: best-effort terminal-error write itself failed for run %s",
                 run_id,
             )
-            if updated is None:
-                logger.error(
-                    "execute_run: best-effort terminal-error UPDATE matched 0 rows for run %s",
-                    run_id,
-                )
-                return
-            # Engine-error path counts as 'error' verdict for metrics.
-            runs_total.labels(verdict="error").inc()
-            run_request_count.observe(len(request_results))
-            await record_event(
-                conn,
-                actor_kind="system",
-                actor_id=None,
-                kind="run.completed",
-                target_kind="run",
-                target_id=run_id,
-                payload={
-                    "verdict": "error",
-                    "status": "error",
-                    "request_count": len(request_results),
-                    "engine_error": engine_error,
-                },
-            )
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "execute_run: best-effort terminal-error write itself failed for run %s",
+
+
+async def _write_terminal_error(
+    run_id: UUID,
+    request_results: list[RunRequestResult],
+    engine_error: str,
+) -> None:
+    evidence = RunEvidence(requests=request_results, engine_error=engine_error)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        updated = await conn.fetchrow(
+            """
+            UPDATE runs
+            SET status = 'error', verdict = 'error', evidence = $1::jsonb,
+                finished_at = now()
+            WHERE id = $2 AND status = 'running'
+            RETURNING id
+            """,
+            _evidence_json(evidence),
             run_id,
+        )
+        if updated is None:
+            # Not a second failure: the run already left 'running' (e.g. the
+            # verdict UPDATE landed and only its completion event failed).
+            logger.warning(
+                "execute_run: terminal-error UPDATE matched 0 rows for run %s "
+                "(run already left 'running'); skipping completion event",
+                run_id,
+            )
+            return
+        # Engine-error path counts as 'error' verdict for metrics.
+        runs_total.labels(verdict="error").inc()
+        run_request_count.observe(len(request_results))
+        await record_event(
+            conn,
+            actor_kind="system",
+            actor_id=None,
+            kind="run.completed",
+            target_kind="run",
+            target_id=run_id,
+            payload={
+                "verdict": "error",
+                "status": "error",
+                "request_count": len(request_results),
+                "engine_error": engine_error,
+            },
         )
