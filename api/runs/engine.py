@@ -750,7 +750,8 @@ _PG_REPLACEMENT_CHAR = "\N{REPLACEMENT CHARACTER}"
 def _pg_safe(obj: Any) -> Any:
     """Return a copy of ``obj`` whose every string (dict keys included) Postgres
     can store: each unstorable code point becomes U+FFFD. Non-strings pass
-    through."""
+    through. Keys that collide once rewritten (``"a\\x00"`` and ``"a\\ufffd"``)
+    keep the last value, which is acceptable for an excerpt."""
     if isinstance(obj, str):
         return _PG_UNSAFE_CHARS_RE.sub(_PG_REPLACEMENT_CHAR, obj)
     if isinstance(obj, dict):
@@ -761,8 +762,16 @@ def _pg_safe(obj: Any) -> Any:
 
 
 def _evidence_json(evidence: RunEvidence) -> str:
-    """Serialise evidence for ``runs.evidence``. Every terminal write uses this."""
-    return json.dumps(_pg_safe(evidence.model_dump(mode="json")))
+    """Serialise evidence for ``runs.evidence``. Every terminal write uses this.
+
+    Sanitises the Python-mode dump, then re-validates and dumps in JSON mode.
+    The order matters: the JSON-mode dump raises ``UnicodeEncodeError`` on a
+    lone surrogate in a dict key (values are fine), so sanitising after it is
+    too late. The JSON-mode dump still does the rest (UUIDs to strings, NaN
+    and infinities to ``null``, which jsonb would refuse as well).
+    """
+    cleaned = _pg_safe(evidence.model_dump(mode="python"))
+    return json.dumps(RunEvidence.model_validate(cleaned).model_dump(mode="json"))
 
 
 # ---------- run aggregation ----------
@@ -1103,8 +1112,11 @@ async def _write_terminal_error(
             run_id,
         )
         if updated is None:
-            logger.error(
-                "execute_run: best-effort terminal-error UPDATE matched 0 rows for run %s",
+            # Not a second failure: the run already left 'running' (e.g. the
+            # verdict UPDATE landed and only its completion event failed).
+            logger.warning(
+                "execute_run: terminal-error UPDATE matched 0 rows for run %s "
+                "(run already left 'running'); skipping completion event",
                 run_id,
             )
             return

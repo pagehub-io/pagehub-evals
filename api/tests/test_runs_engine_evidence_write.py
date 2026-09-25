@@ -147,10 +147,11 @@ async def test_binary_webp_body_reaches_terminal_status_with_evidence(db_pool: s
 
 
 @pytest.mark.asyncio
-async def test_nul_in_json_body_keys_and_eval_detail_is_stored(db_pool: str) -> None:  # noqa: F811
-    # Valid JSON may carry ``\u0000`` (and lone surrogates) in keys and
-    # values; they reach the excerpt as a dict and the eval detail as the
-    # observed value — not just the string excerpt.
+async def test_nul_and_surrogates_in_json_body_keys_and_eval_detail_are_stored(db_pool: str) -> None:  # noqa: F811
+    # Valid JSON may carry ``\u0000`` and lone surrogates in keys and values;
+    # they reach the excerpt as a dict and the eval detail as the observed
+    # value — not just the string excerpt. A lone surrogate in a KEY is the
+    # sharpest case: pydantic's JSON-mode dump raises on it, not just Postgres.
     run_id = await _seed_run(
         db_pool,
         evals=[("json_path_contains", {"path": "$.name", "needle": "b"})],
@@ -158,7 +159,7 @@ async def test_nul_in_json_body_keys_and_eval_detail_is_stored(db_pool: str) -> 
     response = httpx.Response(
         200,
         headers={"content-type": "application/json"},
-        content=b'{"name": "a\\u0000b", "k\\u0000": "\\ud800", "n": 1}',
+        content=b'{"name": "a\\u0000b", "k\\u0000": "\\ud800", "\\ud800k": 1, "n": 1}',
     )
 
     await _execute_against(db_pool, run_id, response)
@@ -166,7 +167,12 @@ async def test_nul_in_json_body_keys_and_eval_detail_is_stored(db_pool: str) -> 
     run = await _load_run(db_pool, run_id)
     assert run["status"] == "passed", run
     req = run["evidence"]["requests"][0]
-    assert req["response_body_excerpt"] == {"name": "a\ufffdb", "k\ufffd": "\ufffd", "n": 1}
+    assert req["response_body_excerpt"] == {
+        "name": "a\ufffdb",
+        "k\ufffd": "\ufffd",
+        "\ufffdk": 1,
+        "n": 1,
+    }
     detail = req["evaluations"][0]["detail"]
     assert detail["observed"] == "a\ufffdb" and detail["found"] is True
     assert req["evaluations"][0]["passed"] is True
@@ -294,12 +300,14 @@ async def test_error_path_write_retries_without_request_results(db_pool: str) ->
 def test_pg_safe_replaces_nul_and_lone_surrogates_everywhere() -> None:
     evidence = {
         "k\x00": ["a\x00b", "\ud800", "\udfff!", 1, 2.5, None, True, ("t\x00",)],
+        "\udc00k": {"\ud800": "v"},
         "fine": "café \U0001f600",
     }
     out = engine_mod._pg_safe(evidence)
     r = "\N{REPLACEMENT CHARACTER}"
     assert out == {
         f"k{r}": [f"a{r}b", r, f"{r}!", 1, 2.5, None, True, [f"t{r}"]],
+        f"{r}k": {r: "v"},
         "fine": "café \U0001f600",
     }
     assert evidence["k\x00"][0] == "a\x00b"  # input not mutated
@@ -313,11 +321,15 @@ def test_evidence_json_has_no_escape_postgres_refuses() -> None:
         url="http://x/\x00",
         response_status=200,
         response_headers={"x-h": "v\x00"},
-        response_body_excerpt={"k\x00": ["\ud800"]},
+        response_body_excerpt={"k\x00": ["\ud800"], "\ud800k": float("nan")},
         latency_ms=1,
         passed=True,
     )
     text = engine_mod._evidence_json(RunEvidence(requests=[result], engine_error="e\x00"))
     assert "\\u0000" not in text
     assert "\\ud800" not in text
-    assert json.loads(text)["engine_error"] == "e\N{REPLACEMENT CHARACTER}"
+    assert "NaN" not in text  # jsonb refuses it too; the JSON-mode dump nulls it
+    r = "\N{REPLACEMENT CHARACTER}"
+    stored = json.loads(text)
+    assert stored["engine_error"] == f"e{r}"
+    assert stored["requests"][0]["response_body_excerpt"] == {f"k{r}": [r], f"{r}k": None}
