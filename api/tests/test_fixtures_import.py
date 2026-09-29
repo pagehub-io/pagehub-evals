@@ -10,6 +10,7 @@ Two tiers:
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -423,3 +424,38 @@ def test_export_then_import_unrelated_owner(db_pool) -> None:  # noqa: F811
                      if c["name"] == "exp-c" and c["id"] != cid)
         coll = client_b.get(f"/v1/collections/{cid_b}").json()
         assert len(coll["items"]) == 1
+
+
+def _ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def test_import_returns_the_ids_it_wrote(db_pool) -> None:  # noqa: F811
+    """The response names every row the import wrote, so a runner can bind to
+    exactly these ids instead of looking names up in the listing, which is
+    owner-unscoped and capped at the 500 newest rows (pagehub-io/pagehub
+    docs/plans/2026-09-29-pagehub-eval-suite.md, section 4.1)."""
+    bundle = _load_example_bundle()
+    with operator_test_client(db_pool) as client:
+        r = _import(client, bundle)
+        assert r.status_code == 200, r.text
+        ids = r.json()["ids"]
+        for kind in ("environments", "requests", "collections"):
+            assert set(ids[kind]) == {x["name"] for x in bundle[kind]}, kind
+            for name, ref in ids[kind].items():
+                got = client.get(f"/v1/{kind}/{ref['id']}")
+                assert got.status_code == 200, (kind, name, got.text)
+                assert got.json()["name"] == name
+                assert _ts(got.json()["updated_at"]) == _ts(ref["updated_at"]), (kind, name)
+
+
+def test_reimport_returns_the_same_ids_with_a_newer_updated_at(db_pool) -> None:  # noqa: F811
+    bundle = _load_example_bundle()
+    with operator_test_client(db_pool) as client:
+        first = _import(client, bundle).json()["ids"]
+        second = _import(client, bundle).json()["ids"]
+        for kind in ("environments", "requests", "collections"):
+            assert first[kind].keys() == second[kind].keys(), kind
+            for name in first[kind]:
+                assert second[kind][name]["id"] == first[kind][name]["id"], (kind, name)
+                assert _ts(second[kind][name]["updated_at"]) > _ts(first[kind][name]["updated_at"]), (kind, name)
