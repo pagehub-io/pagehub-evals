@@ -30,7 +30,9 @@ from api.fixtures.schemas import (
     FIXTURE_VERSION,
     FixtureBundle,
     FixtureCounts,
+    FixtureIds,
     FixtureImportResponse,
+    FixtureRowRef,
 )
 from api.shared.secrets import encrypt
 
@@ -78,6 +80,7 @@ async def import_bundle(
         "collections": {"created": 0, "updated": 0},
     }
     warnings: list[str] = []
+    ids: dict[str, dict[str, FixtureRowRef]] = {"environments": {}, "requests": {}, "collections": {}}
 
     if not (bundle.environments or bundle.requests or bundle.collections):
         warnings.append("fixture contained no resources")
@@ -100,7 +103,7 @@ async def import_bundle(
             VALUES ($1, $2, $3::jsonb, $4::jsonb)
             ON CONFLICT (owner_user_id, name) DO UPDATE
               SET variables = EXCLUDED.variables, secrets = EXCLUDED.secrets, updated_at = now()
-            RETURNING (xmax = 0) AS inserted
+            RETURNING id, updated_at, (xmax = 0) AS inserted
             """,
             actor_id,
             env.name,
@@ -108,6 +111,7 @@ async def import_bundle(
             json.dumps(merged),
         )
         counts["environments"]["created" if row["inserted"] else "updated"] += 1
+        ids["environments"][env.name] = FixtureRowRef(id=row["id"], updated_at=row["updated_at"])
 
     # 2. REQUESTS (+ their evaluations, delete-all-then-reinsert).
     name_to_request_id: dict[str, UUID] = {}
@@ -120,7 +124,7 @@ async def import_bundle(
               SET method = EXCLUDED.method, url = EXCLUDED.url, headers = EXCLUDED.headers,
                   body = EXCLUDED.body, capture = EXCLUDED.capture,
                   timeout_ms = EXCLUDED.timeout_ms, updated_at = now()
-            RETURNING id, (xmax = 0) AS inserted
+            RETURNING id, updated_at, (xmax = 0) AS inserted
             """,
             actor_id,
             req.name,
@@ -132,6 +136,7 @@ async def import_bundle(
             req.timeout_ms,
         )
         rid = row["id"]
+        ids["requests"][req.name] = FixtureRowRef(id=rid, updated_at=row["updated_at"])
         name_to_request_id[req.name] = rid
         bucket = "created" if row["inserted"] else "updated"
         counts["requests"][bucket] += 1
@@ -156,13 +161,14 @@ async def import_bundle(
             VALUES ($1, $2, $3)
             ON CONFLICT (owner_user_id, name) DO UPDATE
               SET description = EXCLUDED.description, updated_at = now()
-            RETURNING id, (xmax = 0) AS inserted
+            RETURNING id, updated_at, (xmax = 0) AS inserted
             """,
             actor_id,
             col.name,
             col.description,
         )
         cid = row["id"]
+        ids["collections"][col.name] = FixtureRowRef(id=cid, updated_at=row["updated_at"])
         counts["collections"]["created" if row["inserted"] else "updated"] += 1
 
         await conn.execute("DELETE FROM collection_items WHERE collection_id = $1", cid)
@@ -190,6 +196,7 @@ async def import_bundle(
         requests=FixtureCounts(**counts["requests"]),
         evaluations=FixtureCounts(**counts["evaluations"]),
         collections=FixtureCounts(**counts["collections"]),
+        ids=FixtureIds(**ids),
         warnings=warnings,
     )
 

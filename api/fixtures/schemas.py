@@ -23,7 +23,9 @@ stray one on a hand-authored / export-tweaked object is silently dropped
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
@@ -183,12 +185,33 @@ class FixtureCounts(BaseModel):
     updated: int = 0
 
 
+class FixtureRowRef(BaseModel):
+    """One row an import wrote: its id and the ``updated_at`` the import stamped."""
+
+    id: UUID
+    updated_at: datetime
+
+
+class FixtureIds(BaseModel):
+    """Every environment, request and collection the import wrote, by name.
+
+    Lets a runner bind to exactly the rows its own import wrote instead of
+    looking names up in the listing, which isn't owner-scoped and returns only
+    the 500 newest rows. Additive: callers that read only the counts are
+    unaffected."""
+
+    environments: dict[str, FixtureRowRef] = Field(default_factory=dict)
+    requests: dict[str, FixtureRowRef] = Field(default_factory=dict)
+    collections: dict[str, FixtureRowRef] = Field(default_factory=dict)
+
+
 class FixtureImportResponse(BaseModel):
     environments: FixtureCounts = Field(default_factory=FixtureCounts)
     requests: FixtureCounts = Field(default_factory=FixtureCounts)
     evaluations: FixtureCounts = Field(default_factory=FixtureCounts)
     collections: FixtureCounts = Field(default_factory=FixtureCounts)
     warnings: list[str] = Field(default_factory=list)
+    ids: FixtureIds = Field(default_factory=FixtureIds)
 
 
 # ---------- round-trip normalization ----------
