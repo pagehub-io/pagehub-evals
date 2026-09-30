@@ -29,6 +29,13 @@ empty string into Vercel). No shell expansion.
   `GIT_SHA`, `APP_SLUG`, `ENVIRONMENT`, `NEW_RELIC_*`, and the
   optional `SENTRY_*` set. The workflow upserts them straight from
   org-level secrets / inputs.
+- `PAGEHUB_AUTH_JWKS` — pagehub-auth's public key set, required outside
+  development. The deploy's JWKS opt-in fetches it from that stage's
+  pagehub-auth `/.well-known/jwks.json` and validates it at deploy time
+  (pagehub-auth `specs/asymmetric-access-tokens.md` §3.3; for this public
+  repo, the `pagehub-deploy-public-repos` fork's opt-in). It isn't a
+  secret, but never commit it to `deploy/*.env`: a committed copy skips
+  that validation and goes stale at the next key rotation.
 
 ## What DOES belong here
 

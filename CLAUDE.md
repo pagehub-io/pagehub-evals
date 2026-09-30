@@ -65,7 +65,10 @@ endpoints that exist *to be tested by* a fixture do not belong in this repo.
    `{staging.,}pagehub-evals-app.pages.dev`.
 2. **Local dev ports** — API `8002`, Postgres `5533`. No collision with
    pagehub (`8001`/`5532`) or platform/evals (`4002`).
-3. **Auth** — pagehub-auth-issued HS256 JWT, verified locally, slug-matched
+3. **Auth** — pagehub-auth-issued JWT, verified locally by `kid`: EdDSA
+   against `PAGEHUB_AUTH_JWKS`; the legacy HS256 fleet kid
+   (`JWT_SIGNING_KEYS`) is accepted, logged and counted only until step D
+   (pagehub-auth `specs/asymmetric-access-tokens.md` §3.2). Slug-matched
    to `pagehub-evals` (per `app-prayers`). Operator allowlist via
    `ADMIN_EMAILS` (default `support@pagehub.io`).
 4. **Mobile** — Expo + drawer (auto-opens ≥medium) + breadcrumbs +

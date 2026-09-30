@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
+from prometheus_client.parser import text_string_to_metric_families
 
 from api.config import ConfigurationError, get_settings, reset_settings
 from api.dependencies import _resolve_user, _verify_jwt
@@ -302,6 +303,15 @@ def test_key_set_kid_equal_to_a_legacy_kid_refuses_boot(monkeypatch):
         boot(monkeypatch, PAGEHUB_AUTH_JWKS=jwks(jwk(LEGACY_KID, OTHER_KEY)))
 
 
+@pytest.mark.parametrize("var", ["JWT_SIGNING_KEYS", "JWT_SIGNING_KEY"])
+def test_legacy_kid_repeated_in_signing_keys_refuses_boot(monkeypatch, var):
+    # The verifier picks a legacy secret by kid, so a repeated kid would drop one secret silently.
+    env = {"JWT_SIGNING_KEYS": None, var: f"{LEGACY_KID}:{LEGACY_SECRET},{LEGACY_KID}:other-secret"}
+    with pytest.raises(ConfigurationError, match=f"repeats kid '{LEGACY_KID}'") as e:
+        boot(monkeypatch, **env)
+    assert LEGACY_SECRET not in str(e.value) and "other-secret" not in str(e.value)
+
+
 def test_two_keys_in_the_set_are_both_trusted(monkeypatch):
     boot(monkeypatch, PAGEHUB_AUTH_JWKS=jwks(jwk(TEST_KID, TEST_KEY), jwk("ed-test-2", OTHER_KEY)))
     assert _verify_jwt(eddsa())["sub"] == "user-1"
@@ -322,13 +332,21 @@ def test_health_reports_jwks_kids():
     assert public_x(TEST_KEY) not in json.dumps(body)
 
 
-def test_metrics_exposes_the_legacy_accept_counter():
+def _scraped_legacy_accepts(client: TestClient) -> float:
+    for family in text_string_to_metric_families(client.get("/metrics").text):
+        for sample in family.samples:
+            if sample.name == "fleet_jwt_legacy_accepts_total":
+                return sample.value
+    raise AssertionError("/metrics does not export fleet_jwt_legacy_accepts_total")
+
+
+def test_metrics_counts_each_legacy_accept():
     from api.main import app
 
-    _verify_jwt(legacy())
     with TestClient(app) as client:
-        text = client.get("/metrics").text
-    assert "fleet_jwt_legacy_accepts_total" in text
+        before = _scraped_legacy_accepts(client)
+        _verify_jwt(legacy())
+        assert _scraped_legacy_accepts(client) == before + 1
 
 
 def test_decoded_signature_segment_helper_is_sane():

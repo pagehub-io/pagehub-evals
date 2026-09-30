@@ -66,16 +66,17 @@ def _require_bool(name: str) -> bool:
     )
 
 
-def _parse_signing_keys_env(raw: str) -> list[tuple[str, str]]:
-    """Parse JWT_SIGNING_KEYS into [(kid, secret), ...].
+def _parse_signing_keys_env(raw: str) -> dict[str, str]:
+    """Parse JWT_SIGNING_KEYS into ``{kid: secret}``.
 
     Format: comma-separated ``kid:secret`` pairs, e.g.
     ``kid-1:secret-1,kid-2:secret-2``. Entries without a ``:`` are
     rejected — no synthesized 'default' kid, no implicit single-secret
     fallback. Either supply at least one ``kid:secret`` pair, or the
-    process refuses to boot.
+    process refuses to boot. A repeated kid refuses boot too: the
+    verifier picks the secret by kid, so a repeat would silently drop one.
     """
-    keys: list[tuple[str, str]] = []
+    keys: dict[str, str] = {}
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
@@ -91,7 +92,11 @@ def _parse_signing_keys_env(raw: str) -> list[tuple[str, str]]:
             raise ConfigurationError(
                 "JWT_SIGNING_KEYS entries must have non-empty kid and secret"
             )
-        keys.append((kid, secret))
+        if kid in keys:
+            raise ConfigurationError(
+                f"JWT_SIGNING_KEYS repeats kid {kid!r}; each kid must name exactly one secret"
+            )
+        keys[kid] = secret
     if not keys:
         raise ConfigurationError("JWT_SIGNING_KEYS must contain at least one kid:secret pair")
     return keys
@@ -131,7 +136,8 @@ class Settings:
     pagehub_auth_base_url: str
     pagehub_auth_issuer: str
     service_api_key: str
-    jwt_signing_keys: list[tuple[str, str]]
+    # kid -> legacy HS256 secret, from JWT_SIGNING_KEYS.
+    jwt_signing_keys: dict[str, str]
     app_slug: str
     runs_enabled: bool
     database_url: str
@@ -195,7 +201,7 @@ def get_settings() -> Settings:
             )
         raw_signing = single
     signing_keys = _parse_signing_keys_env(raw_signing)
-    pagehub_auth_jwks = _load_pagehub_auth_jwks(env, {kid for kid, _ in signing_keys})
+    pagehub_auth_jwks = _load_pagehub_auth_jwks(env, set(signing_keys))
 
     # Optional only — absence disables Sentry; presence enables it.
     sentry_dsn = os.getenv("SENTRY_DSN", "").strip() or None

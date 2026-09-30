@@ -65,11 +65,10 @@ def _verify_jwt(token: str) -> dict:
     except jwt.PyJWTError as e:
         logger.warning("JWT verification failed: %s", e)
         raise HTTPException(status_code=401, detail="Invalid token") from None
-    legacy = dict(settings.jwt_signing_keys)
     if isinstance(kid, str) and kid in settings.pagehub_auth_jwks:
         key, algorithm = settings.pagehub_auth_jwks[kid], "EdDSA"
-    elif isinstance(kid, str) and kid in legacy:
-        key, algorithm = legacy[kid], "HS256"
+    elif isinstance(kid, str) and kid in settings.jwt_signing_keys:
+        key, algorithm = settings.jwt_signing_keys[kid], "HS256"
     else:
         logger.warning("JWT verification failed: unknown kid")
         raise HTTPException(status_code=401, detail="Invalid token")
