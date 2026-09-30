@@ -33,6 +33,11 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/pagehub_evals
       - APP_URL=http://localhost:8002
       - JWT_SIGNING_KEYS=dev-kid:local-dev-jwt-signing-key-DO-NOT-USE-IN-PROD
+      # pagehub-auth's dev public key set (pagehub-auth dev_keys.DEV_JWKS;
+      # asymmetric-access-tokens §3.7). Accepted only because ENVIRONMENT is
+      # development; the local pagehub-auth keeps issuing HS256 dev-kid tokens
+      # (the legacy path) until its compose flips EDDSA_ISSUANCE.
+      - 'PAGEHUB_AUTH_JWKS={"keys":[{"alg":"EdDSA","crv":"Ed25519","kid":"ed-dev-1","kty":"OKP","use":"sig","x":"6ICMnghhr2ZPpbROB4UEHFBVyhMr5wnpysH-0Tqciow"}]}'
       - PAGEHUB_AUTH_BASE_URL=http://host.docker.internal:8080
       - PAGEHUB_AUTH_ISSUER=http://localhost:8080
       - SERVICE_API_KEY=local-dev-service-api-key

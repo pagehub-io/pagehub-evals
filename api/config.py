@@ -10,13 +10,21 @@ Two and only two values are optional (absence is meaningful, not a
 default):
 - ``SENTRY_DSN`` — absence disables Sentry; presence enables it.
 - ``SENTRY_TRACES_SAMPLE_RATE`` — only consulted when SENTRY_DSN is set.
+
+``PAGEHUB_AUTH_JWKS`` (pagehub-auth's public key set) is required everywhere
+except ``ENVIRONMENT=development``, where an absent set means legacy HS256
+only (asymmetric-access-tokens §3.2: the gate is an allowlist of
+``development``, never a list of stages).
 """
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from dotenv import load_dotenv
+
+from api.shared.fleet_jwt import parse_jwks
 
 load_dotenv(".env.local")
 load_dotenv()
@@ -58,16 +66,17 @@ def _require_bool(name: str) -> bool:
     )
 
 
-def _parse_signing_keys_env(raw: str) -> list[tuple[str, str]]:
-    """Parse JWT_SIGNING_KEYS into [(kid, secret), ...].
+def _parse_signing_keys_env(raw: str) -> dict[str, str]:
+    """Parse JWT_SIGNING_KEYS into ``{kid: secret}``.
 
     Format: comma-separated ``kid:secret`` pairs, e.g.
     ``kid-1:secret-1,kid-2:secret-2``. Entries without a ``:`` are
     rejected — no synthesized 'default' kid, no implicit single-secret
     fallback. Either supply at least one ``kid:secret`` pair, or the
-    process refuses to boot.
+    process refuses to boot. A repeated kid refuses boot too: the
+    verifier picks the secret by kid, so a repeat would silently drop one.
     """
-    keys: list[tuple[str, str]] = []
+    keys: dict[str, str] = {}
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
@@ -83,9 +92,39 @@ def _parse_signing_keys_env(raw: str) -> list[tuple[str, str]]:
             raise ConfigurationError(
                 "JWT_SIGNING_KEYS entries must have non-empty kid and secret"
             )
-        keys.append((kid, secret))
+        if kid in keys:
+            raise ConfigurationError(
+                f"JWT_SIGNING_KEYS repeats kid {kid!r}; each kid must name exactly one secret"
+            )
+        keys[kid] = secret
     if not keys:
         raise ConfigurationError("JWT_SIGNING_KEYS must contain at least one kid:secret pair")
+    return keys
+
+
+def _load_pagehub_auth_jwks(env: str, legacy_kids: set[str]) -> dict[str, Ed25519PublicKey]:
+    """Fail-closed outside development: a missing, unparseable, empty or
+    dev-material key set refuses boot. A malformed set refuses boot in
+    development too; only its absence, and the dev key, are allowed there."""
+    development = env == "development"
+    raw = os.getenv("PAGEHUB_AUTH_JWKS", "").strip()
+    if not raw:
+        if development:
+            logger.warning("PAGEHUB_AUTH_JWKS is unset: legacy HS256 tokens only (development)")
+            return {}
+        raise ConfigurationError(
+            f"PAGEHUB_AUTH_JWKS is required when ENVIRONMENT={env!r} (only development may omit it)"
+        )
+    try:
+        keys = parse_jwks(raw, allow_dev=development)
+    except ValueError as e:
+        raise ConfigurationError(f"PAGEHUB_AUTH_JWKS: {'; '.join(e.args[0])}") from None
+    clash = sorted(set(keys) & legacy_kids)
+    if clash:
+        raise ConfigurationError(
+            f"PAGEHUB_AUTH_JWKS kid(s) {clash} also name a legacy JWT_SIGNING_KEYS kid; "
+            "the kid must say which key verifies a token"
+        )
     return keys
 
 
@@ -97,7 +136,8 @@ class Settings:
     pagehub_auth_base_url: str
     pagehub_auth_issuer: str
     service_api_key: str
-    jwt_signing_keys: list[tuple[str, str]]
+    # kid -> legacy HS256 secret, from JWT_SIGNING_KEYS.
+    jwt_signing_keys: dict[str, str]
     app_slug: str
     runs_enabled: bool
     database_url: str
@@ -105,6 +145,8 @@ class Settings:
     admin_emails: frozenset[str]
     sentry_dsn: str | None
     sentry_traces_sample_rate: float | None
+    # kid -> Ed25519 public key, from PAGEHUB_AUTH_JWKS (asymmetric-access-tokens §3.2).
+    pagehub_auth_jwks: dict[str, Ed25519PublicKey] = field(default_factory=dict)
 
 
 _settings_singleton: Settings | None = None
@@ -159,6 +201,7 @@ def get_settings() -> Settings:
             )
         raw_signing = single
     signing_keys = _parse_signing_keys_env(raw_signing)
+    pagehub_auth_jwks = _load_pagehub_auth_jwks(env, set(signing_keys))
 
     # Optional only — absence disables Sentry; presence enables it.
     sentry_dsn = os.getenv("SENTRY_DSN", "").strip() or None
@@ -188,6 +231,7 @@ def get_settings() -> Settings:
         admin_emails=admin_emails,
         sentry_dsn=sentry_dsn,
         sentry_traces_sample_rate=sentry_traces_sample_rate,
+        pagehub_auth_jwks=pagehub_auth_jwks,
     )
     _settings_singleton = settings
     return settings

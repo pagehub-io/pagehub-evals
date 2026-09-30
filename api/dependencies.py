@@ -3,8 +3,12 @@
 Two auth paths land at the same ``AuthContext``:
 
 - **User JWT**: ``Authorization: Bearer <jwt>`` issued by pagehub-auth.
-  Verified locally with the shared HS256 signing keys. Slug must
-  match ``settings.app_slug``. Sets ``actor_kind="user"``.
+  Verified locally, the key chosen by the token's ``kid`` (pagehub-auth
+  ``specs/asymmetric-access-tokens.md`` §3.2): a kid in
+  ``PAGEHUB_AUTH_JWKS`` → that Ed25519 key, EdDSA only; during the
+  overlap, a legacy fleet kid in ``JWT_SIGNING_KEYS`` → HS256 only,
+  logged and counted; anything else → 401. Slug must match
+  ``settings.app_slug``. Sets ``actor_kind="user"``.
 - **Harness key**: ``X-Harness-Key: <secret>``. Looked up against the
   ``harness_keys`` table; revoked or unknown keys → 401. Sets
   ``actor_kind="harness_key"``.
@@ -25,6 +29,7 @@ from fastapi import Depends, Header, HTTPException
 
 from api.config import get_settings
 from api.shared.db import get_db
+from api.shared.fleet_jwt import record_legacy_accept
 from api.shared.secret_hash import hash_secret
 
 logger = logging.getLogger(__name__)
@@ -48,21 +53,38 @@ def _strip_bearer(authorization: str) -> str:
 
 
 def _verify_jwt(token: str) -> dict:
+    """Verify with the one key the token's ``kid`` names, its algorithm pinned.
+
+    Never a mixed ``algorithms`` list: with a key object, PyJWT raises
+    ``TypeError`` on an alg-confusion token, which escapes ``PyJWTError``
+    handlers and becomes a 500 (§3.2, P3). No ``audience`` is ever passed, so
+    a token that carries ``aud`` is refused (§3.2)."""
     settings = get_settings()
-    last_err: Exception | None = None
-    for _kid, secret in settings.jwt_signing_keys:
-        try:
-            return jwt.decode(
-                token,
-                secret,
-                algorithms=["HS256"],
-                issuer=settings.pagehub_auth_issuer,
-            )
-        except jwt.InvalidTokenError as e:
-            last_err = e
-            continue
-    logger.warning("JWT verification failed: %s", last_err)
-    raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.PyJWTError as e:
+        logger.warning("JWT verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid token") from None
+    if isinstance(kid, str) and kid in settings.pagehub_auth_jwks:
+        key, algorithm = settings.pagehub_auth_jwks[kid], "EdDSA"
+    elif isinstance(kid, str) and kid in settings.jwt_signing_keys:
+        key, algorithm = settings.jwt_signing_keys[kid], "HS256"
+    else:
+        logger.warning("JWT verification failed: unknown kid")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=[algorithm],
+            issuer=settings.pagehub_auth_issuer,
+        )
+    except jwt.PyJWTError as e:
+        logger.warning("JWT verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid token") from None
+    if algorithm == "HS256":
+        record_legacy_accept(app=settings.app_slug, stage=settings.env, kid=kid, claims=claims)
+    return claims
 
 
 async def _resolve_user(authorization: str, db: asyncpg.Connection) -> AuthContext:

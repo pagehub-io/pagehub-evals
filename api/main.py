@@ -126,6 +126,7 @@ async def health() -> HealthResponse:
         git_sha=settings.git_sha,
         boot=boot,
         capabilities=list(CAPABILITIES),
+        jwks_kids=sorted(settings.pagehub_auth_jwks),
     )
 
 
