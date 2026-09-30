@@ -10,6 +10,7 @@ import os
 import pytest
 
 from api.config import reset_settings
+from api.tests._fleet_keys import TEST_JWKS
 
 # Module-level so the envs are present BEFORE pytest collects test
 # modules (api.main runs get_settings() at import time). Per-test
@@ -30,6 +31,9 @@ _TEST_ENV = {
     # actually called encrypt()). Same key as docker-compose's dev value.
     "ENCRYPTION_KEY": "6bzQXvxLe_oere1FNN-mWtRwyQXFUJBaOw_R7iYvcX8=",
     "ADMIN_EMAILS": "support@pagehub.io",
+    # pagehub-auth's public key set (asymmetric-access-tokens §3.2). A key
+    # generated per run: the committed dev key is refused outside development.
+    "PAGEHUB_AUTH_JWKS": TEST_JWKS,
 }
 for _k, _v in _TEST_ENV.items():
     os.environ.setdefault(_k, _v)

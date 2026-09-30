@@ -34,3 +34,7 @@ class HealthResponse(BaseModel):
     git_sha: str
     boot: dict[str, Any] | None = None
     capabilities: list[str]
+    # The pagehub-auth key ids this process verifies with (public data;
+    # asymmetric-access-tokens §3.2, the precondition for step C and every
+    # key rotation's check).
+    jwks_kids: list[str]

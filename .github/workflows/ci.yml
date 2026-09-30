@@ -90,4 +90,8 @@ jobs:
           DATABASE_URL: postgresql://pagehub_evals:postgres@localhost:5533/pagehub_evals
           ENCRYPTION_KEY: ZmVybmV0LXRlc3Qta2V5LTMyLWJ5dGVzLWJhc2U2NA==
           ADMIN_EMAILS: ci-admin@example.com
+          # pagehub-auth's public key set (asymmetric-access-tokens §3.2),
+          # required outside development. Public half of a throwaway key; the
+          # tests re-point it per test at a key generated each run (conftest).
+          PAGEHUB_AUTH_JWKS: '{"keys":[{"alg":"EdDSA","crv":"Ed25519","kid":"ed-ci-1","kty":"OKP","use":"sig","x":"_HPSsJKsq-dFcedThWc7cPuTEVr-YNA6eYbKfbv1zpI"}]}'
         run: pytest api/tests/ -v --tb=short
