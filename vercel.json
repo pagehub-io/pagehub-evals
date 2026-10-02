@@ -15,5 +15,5 @@
       "dest": "api/index.py"
     }
   ],
-  "regions": ["iad1"]
+  "regions": ["sfo1"]
 }
