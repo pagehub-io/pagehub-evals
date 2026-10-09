@@ -75,6 +75,11 @@ BAD_CURSORS = [
     _b64(json.dumps({"c": "2026-10-01T12:00:00", "i": str(uuid.uuid4())}).encode()),  # no offset
     _b64(json.dumps({"c": T0.isoformat(), "i": "not-a-uuid"}).encode()),
     _b64(json.dumps({"c": 5, "i": str(uuid.uuid4())}).encode()),
+    _b64(json.dumps({"c": T0.isoformat(), "i": 5}).encode()),  # "i" not a string
+    _b64(
+        json.dumps({"c": "0001-01-01T00:00:00+14:00", "i": str(uuid.uuid4())}).encode()
+    ),  # no UTC form
+    _b64(json.dumps({"c": "9999-12-31T23:59:59-14:00", "i": str(uuid.uuid4())}).encode()),
 ]
 
 
@@ -88,6 +93,7 @@ BAD_CURSORS = [
         "name=" + "x" * 201,
         "name=ok&name=" + "x" * 201,
         "owner=someone",
+        "name=a%00b",
         *[f"cursor={c}" for c in BAD_CURSORS],
     ],
 )
@@ -317,3 +323,21 @@ def test_two_queries_per_page(db_pool) -> None:  # noqa: F811
         app.dependency_overrides.clear()
     assert len(body["items"]) == 3
     assert len(calls) == 2, calls
+
+
+def test_tied_rows_straddling_a_page_boundary(db_pool) -> None:  # noqa: F811
+    # One fixture import gives all its collections the same created_at, so ties
+    # are the normal case. With limit=2 every page boundary falls inside a tie:
+    # without the id in the cursor comparison, rows would be skipped or repeated.
+    _seed(db_pool, [("op-A", f"t{i}", T0) for i in range(5)])
+    seen: list[str] = []
+    cursor = None
+    with operator_test_client(db_pool) as client:
+        for _ in range(10):
+            q = "limit=2" + (f"&cursor={cursor}" if cursor else "")
+            body = client.get(f"/v1/collections?{q}").json()
+            seen += _names(body)
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+    assert sorted(seen) == [f"t{i}" for i in range(5)] and len(seen) == 5

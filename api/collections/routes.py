@@ -7,7 +7,7 @@ DB unique constraint; duplicate inserts return 409.
 import base64
 import binascii
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -80,12 +80,17 @@ def _decode_cursor(cursor: str) -> tuple[datetime, UUID]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         data = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
+        if not isinstance(data, dict) or not isinstance(data.get("i"), str):
+            raise ValueError("cursor shape")
         created_at = datetime.fromisoformat(data["c"])
         row_id = UUID(data["i"])
-    except (binascii.Error, UnicodeError, ValueError, KeyError, TypeError) as e:
+        if created_at.tzinfo is None:
+            raise ValueError("cursor timestamp has no offset")
+        # A timestamp that parses but can't be expressed in UTC would fail at
+        # bind time as a 500; normalising here makes it a 422.
+        created_at = created_at.astimezone(UTC)
+    except (binascii.Error, UnicodeError, ValueError, KeyError, TypeError, OverflowError) as e:
         raise HTTPException(status_code=422, detail=_INVALID_CURSOR) from e
-    if created_at.tzinfo is None:
-        raise HTTPException(status_code=422, detail=_INVALID_CURSOR)
     return created_at, row_id
 
 
@@ -144,9 +149,11 @@ async def list_collections(
     if name is not None:
         if len(name) > _MAX_NAMES:
             raise HTTPException(status_code=422, detail=f"at most {_MAX_NAMES} name values")
-        if any(not n or len(n) > _MAX_NAME_LEN for n in name):
+        # Postgres text can't hold NUL, so a NUL would otherwise be a 500.
+        if any(not n or len(n) > _MAX_NAME_LEN or "\x00" in n for n in name):
             raise HTTPException(
-                status_code=422, detail=f"each name must be 1-{_MAX_NAME_LEN} characters"
+                status_code=422,
+                detail=f"each name must be 1-{_MAX_NAME_LEN} characters, without NUL",
             )
     after = _decode_cursor(cursor) if cursor is not None else None
 

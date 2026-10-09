@@ -173,3 +173,5 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
 
 - **Q1 (recommended: no):** should this slice also catch up the remote `pagehub-evals-staging` (8 commits)? The
   recommendation is a separate slice, because none of the fleet's gates use it.
+  - **Answered, no** (owner, Releases board, 2026-10-08): "we shouldn't run full evals on staging/preprod ci". Evals
+    stay a local gate, so no remote deploy or tag in this slice.
