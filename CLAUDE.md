@@ -13,6 +13,23 @@ bearing **runs** are the product.
 > Status: **scaffolding only.** This file documents the target shape; the JTBD
 > implementation lands in a follow-up.
 
+## Local only: pagehub-evals is not deployed
+
+**We don't deploy evals** (owner, 2026-10-08, #34). Pagehub-evals runs only in
+each developer machine's local stack (API `8002`), where the fleet's apps run
+their full eval suites as the local gate before a `staging-*` tag. No CI job
+runs evals against staging or preprod. There is no production.
+
+**Don't cut `staging-*` or `v*` tags in this repo**, whatever the fleet-wide
+release order says. `.github/workflows/deploy.yml` still fires on them and
+prints a manual redeploy command.
+
+**Still open:** `pagehub-evals-staging.vercel.app` is still served, publicly,
+at `3e518fd`, last deployed in May 2026, with the same access model as below.
+Taking it down is the owner's call. Until then, the "local only" reasoning
+below doesn't cover it. Anything below about domains, Supabase or
+`pagehub-infra` is the scaffold's original target, not how it runs.
+
 ## Pure evals — no in-repo targets
 
 **Pagehub-evals is a pure evals app: it must never host the system under
@@ -62,15 +79,33 @@ endpoints that exist *to be tested by* a fixture do not belong in this repo.
 
 1. **app_name / Vercel project slug** — `pagehub-evals`. Domains:
    `pagehub-evals-{staging,production}.vercel.app`. Cloudflare Pages:
-   `{staging.,}pagehub-evals-app.pages.dev`.
+   `{staging.,}pagehub-evals-app.pages.dev`. Production was never
+   deployed, and staging is a stale May build (see "Local only" above).
 2. **Local dev ports** — API `8002`, Postgres `5533`. No collision with
    pagehub (`8001`/`5532`) or platform/evals (`4002`).
 3. **Auth** — pagehub-auth-issued JWT, verified locally by `kid`: EdDSA
    against `PAGEHUB_AUTH_JWKS`; the legacy HS256 fleet kid
    (`JWT_SIGNING_KEYS`) is accepted, logged and counted only until step D
    (pagehub-auth `specs/asymmetric-access-tokens.md` §3.2). Slug-matched
-   to `pagehub-evals` (per `app-prayers`). Operator allowlist via
-   `ADMIN_EMAILS` (default `support@pagehub.io`).
+   to `pagehub-evals` (per `app-prayers`).
+   **Who is an operator:** anyone holding a valid pagehub-evals token.
+   `require_user` only refuses harness keys, so every such token can do all of
+   the following:
+   - author requests and collections;
+   - list every owner's rows, and edit any owner's environment;
+   - mint and revoke harness keys;
+   - start runs.
+
+   A run can send a stored secret to a URL the operator chooses (read in the
+   code, not executed). So the admin-only secrets view below isn't a real
+   secrets boundary. `ADMIN_EMAILS` (default
+   `support@pagehub.io`) only sets `is_admin`, which today gates nothing but
+   `GET /v1/environments/{id}?reveal_secrets=true` (checked on a local stack,
+   2026-10-08: a non-admin token lists collections and environments, 200, and
+   is refused secrets, 403). On the local stack that's acceptable, because
+   the only token holders are that machine's own operators (#34). Settle it
+   before pagehub-evals is ever deployed, and for the still-served staging
+   above.
 4. **Mobile** — Expo + drawer (auto-opens ≥medium) + breadcrumbs +
    `SupportWidget` from `@pagehub-io/ux@^0.1.0`.
 5. **JTBD-pivot deferred** — scaffolding ships pure structural parity. The
