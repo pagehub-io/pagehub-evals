@@ -1,6 +1,6 @@
 # Collections list: paging, name and owner filters (#30)
 
-**Status:** plan rev 1 (2026-10-08), for spec review. The owner asked for it from the Releases board: "Build the
+**Status:** plan rev 2 (2026-10-08). Rev 1's review found 0 critical, 1 important and 6 nits. All are folded in, each marked "(r1 …)". The owner asked for it from the Releases board: "Build the
 fix for pagehub-evals#30 (the 500-collection limit), through the normal spec and review gates."
 
 ## 1. Problem (executed 2026-10-08 against the local stack at 5c91177)
@@ -15,13 +15,16 @@ fix for pagehub-evals#30 (the 500-collection limit), through the normal spec and
   - Give Happy: `evals/tools/run_evals.py` (executed: it's the one that failed);
   - serve: `evals/tools/run_pagehub_evals.py` and `scripts/run-evals.py`;
   - prayers: `evals/tools/run_pagehub_evals.py` and `run_platform_suite.py`;
-  - `pagehub-benchmarks/pagehub_benchmarks/grader/client.py`;
-  - `platform/evals/seeds/_helpers/pagehub_evals_client.py`.
+  - `pagehub-benchmarks/pagehub_benchmarks/grader/client.py`.
+
+  `platform/evals/seeds/_helpers/pagehub_evals_client.py` isn't a consumer (r1 N1). It sends no auth header, so it
+  talks to platform/evals, not to this server, which answers 401.
 - Each listed row also costs one more query for its items (`_row_to_response` → `_load_items`), so a full list is
   501 queries.
 
 Every other list route has the same `LIMIT 500` (environments, requests, runs, harness keys, evaluations, events).
-Only collections is past it today: environments has 20 rows locally. Those stay out of scope (§8).
+`/v1/requests` and `/v1/runs` also return exactly 500 locally (r1 N2). But no gate tool lists them, so they stay out of
+scope (§8). Collections is the route that's breaking gates.
 
 ## 2. Contract
 
@@ -47,15 +50,21 @@ Only collections is past it today: environments has 20 rows locally. Those stay 
   position. That's harmless, because every row is one the caller can already list (§4).
 - **Response:** `CollectionListResponse` gains `next_cursor: str | None`. It's `null` on the last page, and is always
   present: no `response_model_exclude_none`, because `null` says "no more". `items` is unchanged.
-- **Validation (FastAPI `Query`):**
-  - `limit` outside 1–500 → 422;
-  - more than 50 `name`s, or a `name` that's empty or longer than 200 characters → 422;
+- **Validation, all before the DB is touched:**
+  - `limit` outside 1–500 → 422 (FastAPI `Query`);
+  - more than 50 `name`s → 422;
+  - a `name` that's empty or longer than 200 characters → 422. The handler checks each value itself, because a
+    length limit on a repeated `Query` bounds the list, not each element (r1 N3);
   - `owner` other than `me` → 422.
 - **With no parameters,** the call returns the same first 500 rows as today in the same shape, plus `next_cursor`.
   Existing clients see no change: each consumer in §1 reads `.get("items")` or `["items"]` from a dict (read).
-- **Same names as the platform client already expects:** `platform/evals/seeds/_helpers/pagehub_evals_client.py:48`
-  (`_get_all_pages`) already sends `cursor` and follows `next_cursor` until it's falsy. Today it stops after one
-  capped page. After this change it pages to the end, with no client change.
+- **How a consumer resolves its own collections by name (r1 I1):** `owner=me` plus `name=` for up to 50 names per
+  call. Names are unique per owner (`UNIQUE (owner_user_id, name)`), so one call returns at most one row per name: its
+  own copy, never another operator's, and never a stale fork owned by someone else.
+  - Consumers still follow `next_cursor` until it's `null`, rather than assume one page.
+  - A cross-owner name lookup (no `owner`), which picks the newest `updated_at`, isn't a supported way to resolve.
+    Imports bump `updated_at` but not `created_at`, so the copy you want can sit on a later page. It can also be
+    another operator's collection with the same name.
 - **A new capability:** `collections_list_filters` is added to `CAPABILITIES` (`api/schemas.py`), so `/health`
   advertises it. Consumers probe it before relying on `name`, `owner` or `cursor`, as they already do for other
   capabilities. Against an older server, an unknown query parameter is silently ignored, and the client would get
@@ -85,8 +94,9 @@ Only collections is past it today: environments has 20 rows locally. Those stay 
 | Actor | Before | After |
 |---|---|---|
 | Harness key | 403 (`require_user`) | 403, unchanged |
-| Operator JWT (any operator) | Lists the newest 500 rows, any owner. Reads any row by id | Can page through every row, any owner, and filter by name or self. **New:** rows past 500 can now be enumerated without knowing their ids |
+| Operator JWT: anyone holding a valid pagehub-evals token (`app_slug` `pagehub-evals`). This route has no `ADMIN_EMAILS` check (r1 N4) | Lists the newest 500 rows, any owner. Reads any row by id | Can page through every row, any owner, and filter by name or self. **New:** rows past 500 can now be enumerated without knowing their ids |
 | Unauthenticated | 401 | 401, unchanged |
+| Operator B, against a consumer that resolves A's collections by name | Today, a consumer that resolves by name across owners (serve's and pagehub-benchmarks' code, read) can bind to B's same-named, newer collection, and run B's requests under A's gate (reasoned, not reproduced; r1 I1). With `owner=me`, A's consumer only ever sees A's rows. Closing it needs each consumer to adopt (§7) |
 | Crafted `cursor` | n/a | Only moves the start position of a listing the caller can already see. Values are bound as parameters, so a tampered cursor can't inject. Anything malformed is a 422 |
 | Many `name`s, or a huge `limit` | n/a | Capped at 50 names of 200 characters and 500 rows. Anything over is a 422 before the DB is touched |
 
@@ -117,7 +127,8 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
 3. **`name`:** repeated `name=a&name=b` returns only rows named `a` or `b`, from both owners.
 4. **`owner=me`:** with rows from actors A and B, A gets only A's.
 5. **`name` with `owner=me`:** both filters apply together.
-6. **422s:** `limit=0`, `limit=501`, 51 `name`s, an empty `name`, `owner=someone`, and the bad cursors from §2's list.
+6. **422s:** `limit=0`, `limit=501`, 51 `name`s, an empty `name`, a 201-character `name` (r1 N3), `owner=someone`,
+   and the bad cursors from §2's list.
    These run in the no-DB tier, with the exploding connection: rejected before the DB.
 7. **Items:** a page of 3 collections with 0, 1 and 3 items gets each its own items in position order. The batching
    regression test counts `fetch` calls on a wrapped connection: 2 per page.
@@ -133,10 +144,13 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
 - **End to end:** Give Happy's full local gate runs against the rebuilt `:8002` and must stay at 0 failures. It lists
   collections and resolves by name.
 - **Consumers adopt in their own PRs.** The server change is backward compatible, so nothing breaks before they do.
-  - Give Happy's `run_evals.py` is first, in its own plan-light PR, through its review: probe the capability, then
-    list with `name=` for its bundles, at most 50 per call, and keep the newest-`updated_at` choice. That PR is what
+  - Give Happy's `run_evals.py` is first, in its own plan-light PR, through its review. It probes the capability,
+    then lists with `owner=me` and `name=` (at most 50 per call), following `next_cursor` (§2). That PR is what
     retires the fresh-operator-id workaround.
-  - serve, prayers, pagehub-benchmarks and the platform seeds get a pointer on #30 to adopt.
+  - serve, prayers and pagehub-benchmarks each get a tracked issue in their own repo (r1 I1), with the same pattern
+    and §4's cross-owner risk.
+- **Rollback (r1 N6):** revert the build PR, then rebuild `:8002` at the revert. Consumers that adopted fall back,
+  because their capability probe fails, and they get today's capped list.
 - **Remote deploy: not in this slice** (an owner question, Q1). `pagehub-evals-staging` runs 3e518fd from May, 8
   commits behind `main` (#18–#29, none of them deployed). Production has no deployment, and no gate uses either host.
   - A `staging-*` tag here would ship all 8 commits at once. The last public-repo deploy dispatch, on 2026-05-23,
@@ -151,6 +165,8 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
   correctness.
 - Consumers looking up by the ids the import now returns (#25, #30's option 2).
 - A `(created_at DESC, id DESC)` index.
+- A black-box eval of the list route's paging and `owner=me`. It belongs in the evals that exercise pagehub-evals
+  itself (r1 N5).
 
 ## 9. Owner questions
 
