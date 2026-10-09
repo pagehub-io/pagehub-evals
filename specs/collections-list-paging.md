@@ -13,12 +13,13 @@ fix for pagehub-evals#30 (the 500-collection limit), through the normal spec and
   sync failed with `collection 'give-happy-auth' missing after import`: that collection's newest copy ranked 510.
 - Consumers that list collections and pick by name (read, not executed for the ones not run):
   - Give Happy: `evals/tools/run_evals.py` (executed: it's the one that failed);
-  - serve: `evals/tools/run_pagehub_evals.py` and `scripts/run-evals.py`;
-  - prayers: `evals/tools/run_pagehub_evals.py` and `run_platform_suite.py`;
+  - serve: `evals/tools/run_pagehub_evals.py`;
+  - prayers: `evals/tools/run_pagehub_evals.py`;
   - `pagehub-benchmarks/pagehub_benchmarks/grader/client.py`.
 
   `platform/evals/seeds/_helpers/pagehub_evals_client.py` isn't a consumer (r1 N1). It sends no auth header, so it
-  talks to platform/evals, not to this server, which answers 401.
+  talks to platform/evals, not to this server, which answers 401. serve's `scripts/run-evals.py` and prayers'
+  `run_platform_suite.py` also talk to platform/evals (r2 N1).
 - Each listed row also costs one more query for its items (`_row_to_response` → `_load_items`), so a full list is
   501 queries.
 
@@ -96,7 +97,7 @@ scope (§8). Collections is the route that's breaking gates.
 | Harness key | 403 (`require_user`) | 403, unchanged |
 | Operator JWT: anyone holding a valid pagehub-evals token (`app_slug` `pagehub-evals`). This route has no `ADMIN_EMAILS` check (r1 N4) | Lists the newest 500 rows, any owner. Reads any row by id | Can page through every row, any owner, and filter by name or self. **New:** rows past 500 can now be enumerated without knowing their ids |
 | Unauthenticated | 401 | 401, unchanged |
-| Operator B, against a consumer that resolves A's collections by name | Today, a consumer that resolves by name across owners (serve's and pagehub-benchmarks' code, read) can bind to B's same-named, newer collection, and run B's requests under A's gate (reasoned, not reproduced; r1 I1). With `owner=me`, A's consumer only ever sees A's rows. Closing it needs each consumer to adopt (§7) |
+| Operator B, against a consumer that resolves A's collections by name | Today, a consumer that resolves by name across owners (serve's, prayers' and pagehub-benchmarks' code, read; r2 N1) can bind to B's same-named, newer collection, and run B's requests under A's gate (reasoned, not reproduced; r1 I1). With `owner=me`, A's consumer only ever sees A's rows. Closing it needs each consumer to adopt (§7) |
 | Crafted `cursor` | n/a | Only moves the start position of a listing the caller can already see. Values are bound as parameters, so a tampered cursor can't inject. Anything malformed is a 422 |
 | Many `name`s, or a huge `limit` | n/a | Capped at 50 names of 200 characters and 500 rows. Anything over is a 422 before the DB is touched |
 
@@ -149,8 +150,8 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
     retires the fresh-operator-id workaround.
   - serve, prayers and pagehub-benchmarks each get a tracked issue in their own repo (r1 I1), with the same pattern
     and §4's cross-owner risk.
-- **Rollback (r1 N6):** revert the build PR, then rebuild `:8002` at the revert. Consumers that adopted fall back,
-  because their capability probe fails, and they get today's capped list.
+- **Rollback (r1 N6):** revert the build PR, then rebuild `:8002` at the revert. Consumers that adopted then stop at
+  their capability probe with a clear error, rather than fall back (r2 N3). They're re-run once the server is back.
 - **Remote deploy: not in this slice** (an owner question, Q1). `pagehub-evals-staging` runs 3e518fd from May, 8
   commits behind `main` (#18–#29, none of them deployed). Production has no deployment, and no gate uses either host.
   - A `staging-*` tag here would ship all 8 commits at once. The last public-repo deploy dispatch, on 2026-05-23,
@@ -159,8 +160,8 @@ without `DATABASE_URL`. CI runs it against its Postgres service.
 
 ## 8. Out of scope, as follow-ups
 
-- The same `LIMIT 500` on environments, requests, runs, harness keys and evaluations. None is past the cap locally
-  today.
+- The same `LIMIT 500` on environments, requests, runs, harness keys and evaluations. `/v1/requests` and `/v1/runs`
+  are already at 500 locally, but no gate tool lists them (r2 N2).
 - Removing stale fork copies (#30's option 3). That needs the owner's go, and paging makes it unnecessary for
   correctness.
 - Consumers looking up by the ids the import now returns (#25, #30's option 2).

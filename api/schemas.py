@@ -24,6 +24,9 @@ CAPABILITIES: tuple[str, ...] = (
     "filter_capture",
     "transient_retry",
     "run_budget",
+    # GET /v1/collections takes limit, cursor, name and owner=me
+    # (specs/collections-list-paging.md).
+    "collections_list_filters",
 )
 
 

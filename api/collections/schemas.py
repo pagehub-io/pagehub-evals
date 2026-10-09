@@ -27,6 +27,9 @@ class CollectionResponse(BaseModel):
 
 class CollectionListResponse(BaseModel):
     items: list[CollectionResponse]
+    # Pass back as ?cursor= (with the same filters) for the next page; null on
+    # the last page. specs/collections-list-paging.md §2.
+    next_cursor: str | None = None
 
 
 class AddCollectionItemRequest(BaseModel):
