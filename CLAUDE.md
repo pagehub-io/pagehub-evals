@@ -27,6 +27,22 @@ exposes are its own product surfaces — environments, requests, evaluations,
 collections, fixtures, runs, harness keys, events — plus health/metrics. New
 endpoints that exist *to be tested by* a fixture do not belong in this repo.
 
+## Generic harness — an app's eval SUITE lives in that app's repo
+
+Complementary to "pure evals": just as this repo hosts no system-under-test, it hosts no
+*specific application's eval suite*. Pagehub-evals is a **generic, abstract test harness**
+(the engine, the runner, the run/verdict product) plus **a few starter examples** to help
+people get going. A given app's collections / fixtures / seeds are that app's own artifact
+and live in that app's repo — e.g. serve owns its bundles in `app-serve`
+(`evals/collections/serve-*.json`), imported into the harness at runtime; they are not
+committed here. A branch that builds out one application's full eval battery *inside*
+pagehub-evals (per-app fixtures accreting in `fixtures/`, app-named collections) is drift,
+not the model — treat it as that app's content that belongs in that app's repo. When you
+extend the harness, make the capability **generic** (a new eval kind, a new locator strategy,
+a config knob), never app-specific; if a change is only justified by one app's needs, the
+value it hardcodes may be app-specific but the mechanism must not be.
+
+
 ## Surfaces
 
 1. **Standalone site** (Expo web on Cloudflare Pages) — operator triage UI for
@@ -94,3 +110,20 @@ endpoints that exist *to be tested by* a fixture do not belong in this repo.
   ingest, twin-zero-traffic evidence, operator triage UX in `mobile/`.
 - **Out of scope**: porting `platform/evals/` data; building a new
   `@pagehub-io/ux` widget; any non-LLM-harness eval use cases.
+
+### Execute the path, don't read it (security claims especially)
+
+**Never report a vulnerability, data leak, or "X can reach Y" as fact on
+the strength of reading code. Execute it — issue the credential, send the
+request, read the response — and quote the output.** Say "unverified"
+until you have.
+
+The failure mode this stops: verifying the two ENDS of a path and
+inferring the middle. "This writes settings" + "that reads settings"
+does not mean data flows between them — there may be a filter,
+blocklist, allowlist, or unreachable branch in between. Applies equally
+to claims in specs, claims reported to the user, and findings a reviewer
+subagent hands you (verify before repeating; say which claims you checked
+yourself). When a path genuinely can't be executed (production data,
+destructive side effects), label the claim reasoned-not-executed rather
+than presenting inference as fact.
