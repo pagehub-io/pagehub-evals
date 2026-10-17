@@ -30,7 +30,7 @@ up:
 		$(PIP) install -r requirements.txt -q; \
 		echo "  -> Virtual environment created"; \
 	fi
-	@docker compose up -d
+	@GIT_SHA=$$(git rev-parse HEAD) docker compose up -d --build
 	@echo ""
 	@echo "Services:"
 	@echo "  Database:  postgres://postgres:postgres@127.0.0.1:5533/pagehub_evals"

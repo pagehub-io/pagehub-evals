@@ -29,7 +29,8 @@ services:
     # `docker compose --env-file ...`.
     environment:
       - ENVIRONMENT=development
-      - GIT_SHA=dev
+      # Stamped by `make up` from this checkout's HEAD; /health reports it as git_sha.
+      - GIT_SHA=${GIT_SHA:-dev}
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/pagehub_evals
       - APP_URL=http://localhost:8002
       - JWT_SIGNING_KEYS=dev-kid:local-dev-jwt-signing-key-DO-NOT-USE-IN-PROD
