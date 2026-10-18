@@ -1,14 +1,19 @@
 name: CI
 
+# CI starts when the review script adds the 0C/0I label, and runs once on the
+# reviewed commit (skill-sdlc "CI runs after review"). Pushes to a PR branch start nothing.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [labeled]
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint-and-typecheck:
     name: Lint & Type Check
+    if: github.event_name != 'pull_request' || github.event.label.name == '0C/0I'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +51,7 @@ jobs:
 
   backend-tests:
     name: Backend Tests
+    if: github.event_name != 'pull_request' || github.event.label.name == '0C/0I'
     runs-on: ubuntu-latest
 
     services:
