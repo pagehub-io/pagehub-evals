@@ -48,6 +48,11 @@ services:
       # via prod secrets manager. Generate:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       - ENCRYPTION_KEY=6bzQXvxLe_oere1FNN-mWtRwyQXFUJBaOw_R7iYvcX8=
+    # Eval environments point at the services under test as host.docker.internal;
+    # Docker Engine on Linux only defines that name when it's mapped (Docker
+    # Desktop defines it on its own).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8002:8000"
     volumes:
